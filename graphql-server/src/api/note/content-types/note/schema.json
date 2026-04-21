@@ -1,0 +1,42 @@
+{
+  "kind": "collectionType",
+  "collectionName": "notes",
+  "info": {
+    "singularName": "note",
+    "pluralName": "notes",
+    "displayName": "Note",
+    "description": "A user-authored note."
+  },
+  "options": {
+    "draftAndPublish": false
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "title": {
+      "type": "string",
+      "required": true,
+      "maxLength": 200
+    },
+    "content": {
+      "type": "blocks"
+    },
+    "pinned": {
+      "type": "boolean",
+      "default": false
+    },
+    "archived": {
+      "type": "boolean",
+      "default": false
+    },
+    "internalNotes": {
+      "type": "text",
+      "private": false
+    },
+    "tags": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::tag.tag",
+      "inversedBy": "notes"
+    }
+  }
+}

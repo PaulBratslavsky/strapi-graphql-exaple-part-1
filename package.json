@@ -1,0 +1,21 @@
+{
+  "name": "graphql-customization",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Companion monorepo for the Strapi v5 GraphQL customization tutorial — a note-taking app built with Strapi + Next.js App Router.",
+  "scripts": {
+    "install:all": "npm install --prefix graphql-server && npm install --prefix frontend",
+    "dev": "concurrently --kill-others-on-fail --names \"strapi,next\" --prefix-colors \"magenta,cyan\" \"npm:dev:server\" \"npm:dev:frontend\"",
+    "dev:server": "npm --prefix graphql-server run develop",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "seed": "npm --prefix graphql-server run seed:example",
+    "build:server": "npm --prefix graphql-server run build",
+    "build:frontend": "npm --prefix frontend run build"
+  },
+  "engines": {
+    "node": ">=20.0.0 <=24.x.x"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
