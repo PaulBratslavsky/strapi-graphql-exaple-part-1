@@ -6,6 +6,62 @@
 - Target audience: developers comfortable with Node and TypeScript who have not used Strapi before, or who have used Strapi's REST API but not its GraphQL plugin.
 - No frontend code. No authentication. No database beyond SQLite. The goal is understanding the backend surface first; a frontend tutorial and an auth tutorial are linked at the end.
 
+## What is GraphQL?
+
+If you have built a frontend against a REST API, you have probably hit this problem: the list page needs posts with their tags, but the `/posts` endpoint only returns posts. You either make a second request for every post's tags, or you add a query-string flag like `/posts?include=tags`, or you ask the backend team to change the endpoint. Every REST API invents its own solution.
+
+GraphQL is a different way to expose data. Instead of many endpoints that each return a fixed response shape, a GraphQL server exposes **one endpoint** (usually `/graphql`) and the client sends a **query** that says exactly what it wants. The server returns exactly that shape.
+
+Here is the same "posts with tags" request written as a GraphQL query:
+
+```graphql
+query {
+  posts {
+    title
+    body
+    tags {
+      name
+    }
+  }
+}
+```
+
+And the response:
+
+```json
+{
+  "data": {
+    "posts": [
+      { "title": "First post", "body": "...", "tags": [{ "name": "intro" }] },
+      { "title": "Second post", "body": "...", "tags": [{ "name": "intro" }] }
+    ]
+  }
+}
+```
+
+No second request for tags. No over-fetching of fields the UI never displays. No `?include` conventions.
+
+### Three terms to know
+
+GraphQL introduces a small vocabulary. You will see all three throughout this post:
+
+- **Schema** — the catalogue of everything the server can return: every type, every field, every argument. Think of it as a typed API contract. Strapi generates this automatically from your content types.
+- **Query** — a read operation. "Give me this data in this shape." Queries are safe and idempotent.
+- **Mutation** — a write operation. "Create / update / delete this." Mutations change server state.
+
+There are a few more terms (resolvers, subscriptions, fragments) but you will not need them until later.
+
+### Why GraphQL over REST
+
+Summarized as four practical reasons:
+
+- **The client controls the response shape.** Different screens can ask for different fields without the backend changing.
+- **Related data comes in one request.** Nested fields (like `posts → tags`) are fetched in the same round trip.
+- **The schema is self-describing.** Tools like the Apollo Sandbox read the schema and offer autocompletion, inline documentation, and validation out of the box. There is no separate API reference to keep in sync.
+- **Errors surface early.** Misspelled fields, wrong argument types, and missing required values are rejected at parse time, before any business logic runs.
+
+The tradeoff is that building a GraphQL server by hand is a lot of work — every type, resolver, filter, mutation, and input type has to be written out. This is the portion that Strapi's GraphQL plugin automates.
+
 ## Why this post exists
 
 Strapi is a headless CMS. Install the GraphQL plugin and it generates a full GraphQL schema from whatever content types you have defined, with no additional code. The feature is called **Shadow CRUD**, and it is the foundation everything else in the Strapi GraphQL ecosystem builds on.
@@ -299,48 +355,129 @@ export default config;
 
 Restart the dev server to pick up the change. The Sandbox still works in development, but a production deployment would no longer expose it.
 
-## Step 10: First customization — a computed field
+## Step 10: Set up the customization folder structure
 
-Computed fields are fields that do not exist in the database but are derived at query time. They are the simplest introduction to the GraphQL plugin's extension API.
+Before writing any custom resolver, establish the folder structure you will keep using as the project grows. Customizations can technically all live inside `src/index.ts`, but that file becomes hard to read as soon as you have more than one. The convention used here — **one file per concept** under `src/extensions/graphql/`, wired together by an aggregator — is the same structure used by the advanced tutorial, so moving from this post to the next requires adding files, not refactoring the ones you already have.
 
-The plugin's extension service is obtained inside Strapi's `register()` lifecycle hook. Edit `src/index.ts`:
+The structure you will end up with by the end of this post:
+
+```
+src/
+├── index.ts                              # calls the aggregator
+└── extensions/
+    └── graphql/
+        ├── index.ts                      # aggregator
+        ├── computed-fields.ts            # Step 10 — wordCount on Post
+        └── queries.ts                    # Step 11 — searchPosts
+```
+
+Each file under `src/extensions/graphql/` exports a factory function. The aggregator imports every factory and registers them with the plugin's extension service. `src/index.ts` then calls the aggregator in the `register()` lifecycle hook. The advanced tutorial adds three more files to this same directory (`mutations.ts`, `middlewares-and-policies.ts`, `shadow-crud.ts`) without touching anything defined here.
+
+Start by replacing the contents of `src/index.ts`:
 
 ```typescript
 // src/index.ts
 import type { Core } from '@strapi/strapi';
+import registerGraphQLExtensions from './extensions/graphql';
 
 export default {
   register({ strapi }: { strapi: Core.Strapi }) {
-    const extensionService = strapi.plugin('graphql').service('extension');
-
-    extensionService.use(({ nexus }: any) => ({
-      types: [
-        nexus.extendType({
-          type: 'Post',
-          definition(t) {
-            t.nonNull.int('wordCount', {
-              resolve(parent: { body?: string | null }) {
-                const text = (parent?.body ?? '').trim();
-                return text ? text.split(/\s+/).length : 0;
-              },
-            });
-          },
-        }),
-      ],
-      resolversConfig: {
-        'Post.wordCount': { auth: false },
-      },
-    }));
+    registerGraphQLExtensions(strapi);
   },
 
   bootstrap() {},
 };
 ```
 
-Two things are happening:
+Create the aggregator at `src/extensions/graphql/index.ts`. It will be empty initially — Steps 10 and 11 fill it in:
 
+```typescript
+// src/extensions/graphql/index.ts
+import type { Core } from '@strapi/strapi';
+
+export default function registerGraphQLExtensions(strapi: Core.Strapi) {
+  const extensionService = strapi.plugin('graphql').service('extension');
+  // Customization factories will be registered here in Step 10 and Step 11.
+}
+```
+
+Restart the dev server. Nothing has changed in the schema yet — the aggregator is a no-op — but the wiring is in place.
+
+### A brief introduction to Nexus
+
+The next two steps use an API called `nexus.extendType`. Before using it, a short explanation of what Nexus is will save you a lot of guessing.
+
+**Nexus is the library Strapi's GraphQL plugin uses under the hood to build its schema.** It is a small JavaScript/TypeScript library whose job is to describe GraphQL types in code. When Shadow CRUD runs at boot, it uses Nexus to generate `Post`, `PostInput`, `PostFiltersInput`, and all the other types automatically. When you extend the schema with your own custom fields or queries, you also use Nexus — the plugin hands you a `nexus` reference so your code and the auto-generated code end up in the same schema.
+
+You only need to know three things about Nexus to follow this post:
+
+1. **`nexus.extendType({ type: 'Post', definition(t) { ... } })`** — adds new fields to an existing type. You will use this in Step 11 to add `wordCount` to `Post`.
+2. **`nexus.extendType({ type: 'Query', definition(t) { ... } })`** — adds new top-level queries. You will use this in Step 12 to add `searchPosts`. (`Query` and `Mutation` are themselves types, so adding custom queries is just a specific use of `extendType`.)
+3. **Field types are chained.** Inside `definition(t)`, you call methods on `t` to declare each field. The chain reads almost like the GraphQL type it produces:
+
+   | Nexus call                    | GraphQL type produced |
+   | ----------------------------- | --------------------- |
+   | `t.string('title')`           | `title: String`       |
+   | `t.nonNull.string('title')`   | `title: String!`      |
+   | `t.list.string('tags')`       | `tags: [String]`      |
+   | `t.nonNull.int('wordCount')`  | `wordCount: Int!`     |
+
+That is enough to read every Nexus example in this post. The [Nexus documentation](https://nexusjs.org/) covers the rest for when you need it.
+
+## Step 11: First customization — a computed field
+
+Computed fields are fields that do not exist in the database but are derived at query time. They are the simplest introduction to the GraphQL plugin's extension API.
+
+Create the file `src/extensions/graphql/computed-fields.ts`:
+
+```typescript
+// src/extensions/graphql/computed-fields.ts
+export default function computedFields({
+  nexus,
+}: {
+  nexus: typeof import('nexus');
+}) {
+  return {
+    types: [
+      nexus.extendType({
+        type: 'Post',
+        definition(t) {
+          t.nonNull.int('wordCount', {
+            resolve(parent: { body?: string | null }) {
+              const text = (parent?.body ?? '').trim();
+              return text ? text.split(/\s+/).length : 0;
+            },
+          });
+        },
+      }),
+    ],
+    resolversConfig: {
+      'Post.wordCount': { auth: false },
+    },
+  };
+}
+```
+
+What is happening:
+
+- The file exports a named `computedFields` function that takes `{ nexus }` and returns an extension object. Naming the function (instead of using an anonymous arrow) gives you a readable name in error stack traces.
 - `nexus.extendType({ type: 'Post', definition })` appends a new field to the auto-generated `Post` type without replacing or wrapping it. The plugin passes a `nexus` reference into the factory so your extension composes with the generated types.
 - The `resolve(parent, args, context)` callback receives the Post row and returns whatever the declared field type requires. Here it splits the body on whitespace and returns an integer.
+- `resolversConfig` with `auth: false` tells the Users & Permissions plugin that this field is readable without authentication.
+
+Register the factory in the aggregator:
+
+```typescript
+// src/extensions/graphql/index.ts
+import type { Core } from '@strapi/strapi';
+import computedFields from './computed-fields';
+
+export default function registerGraphQLExtensions(strapi: Core.Strapi) {
+  const extensionService = strapi.plugin('graphql').service('extension');
+
+  extensionService.use(computedFields);
+}
+```
 
 Restart the dev server. In the Sandbox, the `Post` type should now show a `wordCount: Int!` field, and this query should return word counts for every post:
 
@@ -353,47 +490,46 @@ query PostsWithWordCount {
 }
 ```
 
-## Step 11: First customization — a custom query
+## Step 12: Second customization — a custom query
 
-The same pattern extends `Query` to define brand-new top-level queries. A small example: return only posts whose title contains a substring.
+The same `nexus.extendType` pattern extends `Query` to define brand-new top-level queries. A small example: return only posts whose title contains a substring.
 
-Extend the existing `extensionService.use(...)` call by adding a second entry to the `types` array:
+Create `src/extensions/graphql/queries.ts`:
 
 ```typescript
-extensionService.use(({ nexus }: any) => ({
-  types: [
-    nexus.extendType({
-      type: 'Post',
-      definition(t) {
-        t.nonNull.int('wordCount', {
-          resolve(parent: { body?: string | null }) {
-            const text = (parent?.body ?? '').trim();
-            return text ? text.split(/\s+/).length : 0;
-          },
-        });
-      },
-    }),
-    nexus.extendType({
-      type: 'Query',
-      definition(t) {
-        t.list.field('searchPosts', {
-          type: nexus.nonNull('Post'),
-          args: { q: nexus.nonNull(nexus.stringArg()) },
-          async resolve(_parent: unknown, args: { q: string }) {
-            return strapi.documents('api::post.post').findMany({
-              filters: { title: { $containsi: args.q } },
-              sort: ['publishedAt:desc'],
-            });
-          },
-        });
-      },
-    }),
-  ],
-  resolversConfig: {
-    'Post.wordCount': { auth: false },
-    'Query.searchPosts': { auth: false },
-  },
-}));
+// src/extensions/graphql/queries.ts
+import type { Core } from '@strapi/strapi';
+
+export default function queries({
+  nexus,
+  strapi,
+}: {
+  nexus: typeof import('nexus');
+  strapi: Core.Strapi;
+}) {
+  return {
+    types: [
+      nexus.extendType({
+        type: 'Query',
+        definition(t) {
+          t.list.field('searchPosts', {
+            type: nexus.nonNull('Post'),
+            args: { q: nexus.nonNull(nexus.stringArg()) },
+            async resolve(_parent: unknown, args: { q: string }) {
+              return strapi.documents('api::post.post').findMany({
+                filters: { title: { $containsi: args.q } },
+                sort: ['publishedAt:desc'],
+              });
+            },
+          });
+        },
+      }),
+    ],
+    resolversConfig: {
+      'Query.searchPosts': { auth: false },
+    },
+  };
+}
 ```
 
 Key points:
@@ -401,7 +537,25 @@ Key points:
 - `nexus.extendType({ type: 'Query', ... })` adds a field to the top-level `Query` type. That field becomes a new top-level GraphQL query: `searchPosts(q: String!): [Post!]`.
 - The resolver calls `strapi.documents('api::post.post').findMany(...)` — the Document Service API, Strapi v5's recommended way to read and write content entries.
 - `$containsi` is a case-insensitive substring filter. The full set of operators matches those available to Shadow CRUD filters.
-- `resolversConfig` with `auth: false` tells the plugin this query can run without authentication. Without it, the Users & Permissions plugin would reject the anonymous request.
+- The `queries` factory takes `{ nexus, strapi }` because it needs the `strapi` instance to run the Document Service call. `computedFields` only needed `{ nexus }` because its resolvers only inspect the parent row.
+
+Register it in the aggregator. Because `queries` needs `strapi`, wrap it in a named inner function rather than passing it directly:
+
+```typescript
+// src/extensions/graphql/index.ts
+import type { Core } from '@strapi/strapi';
+import computedFields from './computed-fields';
+import queries from './queries';
+
+export default function registerGraphQLExtensions(strapi: Core.Strapi) {
+  const extensionService = strapi.plugin('graphql').service('extension');
+
+  extensionService.use(computedFields);
+  extensionService.use(function extendQueries({ nexus }: any) {
+    return queries({ nexus, strapi });
+  });
+}
+```
 
 Restart. In the Sandbox:
 
@@ -427,21 +581,35 @@ Every Post whose title contains "hello" (case-insensitive) should come back, wit
 
 - A Strapi v5 project with the GraphQL plugin installed.
 - One content type (`Post`) with a complete Shadow CRUD surface: list, filter, sort, paginate, create, update, delete.
-- Three customizations: plugin limits, a computed field on `Post`, and a custom top-level query.
+- A customization folder structure under `src/extensions/graphql/` with an aggregator, a computed-fields factory, and a custom-queries factory — the same layout the advanced tutorial uses.
+- Plugin limits configured in `config/plugins.ts`.
 
-That is enough to understand the shape of Strapi's GraphQL customization APIs: the extension service, the `nexus.extendType` pattern, and the fact that resolvers are plain async functions with access to the Strapi instance.
+The final file layout:
+
+```
+src/
+├── index.ts                              # calls registerGraphQLExtensions
+└── extensions/
+    └── graphql/
+        ├── index.ts                      # aggregator
+        ├── computed-fields.ts            # Post.wordCount
+        └── queries.ts                    # Query.searchPosts
+```
+
+That is enough to understand the shape of Strapi's GraphQL customization APIs: the extension service, the `nexus.extendType` pattern, and the one-file-per-concept convention you will continue to use as the project grows.
 
 ## What's next
 
-The advanced tutorial, *Strapi v5 GraphQL Customization — Note-Taking Demo*, builds on this foundation with:
+The advanced tutorial, *Strapi v5 GraphQL Customization — Note-Taking Demo*, uses exactly the same folder structure under `src/extensions/graphql/` and adds more files rather than refactoring the ones you just created. If you continue from here, you will add:
 
-- **`resolversConfig` middlewares and policies** — logging, cache hints, and conditional authorization attached to any resolver.
-- **Selectively disabling Shadow CRUD** — hiding fields, disabling filters, removing mutations from the schema entirely.
-- **Custom object types** — returning aggregate shapes (like a stats object) that do not correspond to a content type.
-- **Multiple custom queries and mutations** — including raw SQL aggregations via `strapi.db.connection.raw`.
-- **Consuming the schema from Next.js 16 App Router** with Apollo Client and Server Actions.
+- **`middlewares-and-policies.ts`** — attach logging, cache hints, and conditional authorization policies to any resolver via `resolversConfig`.
+- **`shadow-crud.ts`** — selectively disable parts of the auto-generated schema: hide fields, disable filters, remove mutations entirely.
+- **`mutations.ts`** — custom mutations that do more than a single update, such as toggling a boolean, archiving, or deep-copying with relations.
+- Additional entries in `queries.ts` — aggregate queries that return custom object types (`NoteStats`, `TagCount`) including raw SQL via `strapi.db.connection.raw`.
 
-If you want to extend the project to multi-user with authentication, a follow-up post covers the users-permissions plugin, cookie-stored JWTs, and per-user ownership enforcement via resolver middlewares and policies.
+The advanced tutorial also adds a Next.js 16 App Router frontend that consumes the schema via Apollo Client in React Server Components and Server Actions.
+
+If you want to extend the project to multi-user with authentication, a follow-up post covers the users-permissions plugin, cookie-stored JWTs, and per-user ownership enforcement via resolver middlewares and policies — added as two more files (`ownership-middlewares.ts` and `ownership-policies.ts`) in the same directory.
 
 **Citations**
 
