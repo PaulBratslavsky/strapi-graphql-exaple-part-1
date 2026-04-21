@@ -48,7 +48,7 @@ flowchart LR
     A[Content types<br/>schema.json] --> B{Strapi boot}
     B --> C[Shadow CRUD]
     C --> D[GraphQL schema:<br/>types, queries,<br/>mutations, filters]
-    D --> E[/graphql endpoint]
+    D --> E["/graphql endpoint"]
 ```
 
 The auto-generated schema covers a wide range of common CRUD use cases, and many smaller applications never need more than Shadow CRUD. However, as soon as the application requires a computed field, a custom aggregation, a mutation that performs more than a single update, or a way to hide parts of the auto-generated schema, you need the customization APIs. The rest of this post covers those APIs.
