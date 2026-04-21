@@ -1202,7 +1202,15 @@ No client-side JavaScript is involved in steps 3 through 7. The browser only eve
 
 ### Mutations via Server Actions
 
-Mutations run from **Server Actions**, which keeps the browser bundle smaller because no Apollo client instance is sent to the client:
+Mutations run from **Server Actions**, which keeps the browser bundle smaller because no Apollo client instance is sent to the client. There are three separate mutation flows in this project, each with a slightly different frontend shape:
+
+1. **Inline action buttons** (Pin, Duplicate, Archive) — small state changes triggered from the detail page with no form. Used for the custom mutations from Step 8.
+2. **A full form flow for create** (`/notes/new`) — a Server Component page with a `<form>` that submits to a Server Action. Used for the auto-generated `createNote` mutation.
+3. **A full form flow for update** (`/notes/[documentId]/edit`) — same shape as create, but preloads the current values. Used for the auto-generated `updateNote` mutation.
+
+There is no separate "delete" flow because the schema has no `deleteNote` mutation: `disableAction('delete')` from Step 4 removed it. Soft delete is exposed through the custom `archiveNote` mutation instead, which sets `archived: true` and is surfaced through the same inline button as Pin and Duplicate.
+
+#### Inline actions
 
 ```typescript
 // frontend/app/notes/[documentId]/actions.ts
@@ -1247,6 +1255,213 @@ export function PinButton({ documentId, pinned }: { documentId: string; pinned: 
   );
 }
 ```
+
+#### Create: `/notes/new`
+
+The create page is a Server Component that fetches the list of tags (so the user can select some) and renders a native `<form>` whose `action` attribute points to a Server Action:
+
+```tsx
+// frontend/app/notes/new/page.tsx (excerpt)
+import { query } from '@/lib/apollo-client';
+import { TAGS } from '@/lib/graphql';
+import { createNoteAction } from './actions';
+
+export default async function NewNotePage() {
+  const { data } = await query<{ tags: Tag[] }>({ query: TAGS });
+  const tags = data?.tags ?? [];
+
+  return (
+    <form action={createNoteAction}>
+      <input name="title" required />
+      <textarea name="content" rows={10} />
+      {tags.map((t) => (
+        <label key={t.documentId}>
+          <input type="checkbox" name="tagIds" value={t.documentId} />
+          {t.name}
+        </label>
+      ))}
+      <button type="submit">Create note</button>
+    </form>
+  );
+}
+```
+
+The Server Action parses the `FormData`, converts the plain-text textarea into Strapi blocks, and calls `createNote`:
+
+```typescript
+// frontend/app/notes/new/actions.ts
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+import { getClient } from '@/lib/apollo-client';
+import { CREATE_NOTE } from '@/lib/graphql';
+import { textToBlocks } from '@/lib/blocks';
+
+export async function createNoteAction(formData: FormData) {
+  const title = String(formData.get('title') ?? '').trim();
+  const content = String(formData.get('content') ?? '');
+  const tagIds = formData.getAll('tagIds').map(String).filter(Boolean);
+
+  if (!title) return { error: 'Title is required.' };
+
+  const { data } = await getClient().mutate<{
+    createNote: { documentId: string };
+  }>({
+    mutation: CREATE_NOTE,
+    variables: {
+      data: {
+        title,
+        content: textToBlocks(content),
+        pinned: false,
+        archived: false,
+        tags: tagIds,
+      },
+    },
+  });
+
+  revalidatePath('/notes');
+  const newId = data?.createNote?.documentId;
+  if (newId) redirect(`/notes/${newId}`);
+}
+```
+
+Two helpers live in `frontend/lib/blocks.ts`: `textToBlocks` (used here) turns user-typed text into Strapi's blocks format by splitting on blank lines; `blocksToText` (used by the edit page) does the inverse.
+
+The `CREATE_NOTE` operation itself is a thin wrapper around the Shadow CRUD mutation:
+
+```typescript
+// frontend/lib/graphql.ts (excerpt)
+export const CREATE_NOTE = gql`
+  mutation CreateNote($data: NoteInput!) {
+    createNote(data: $data) {
+      documentId
+    }
+  }
+`;
+```
+
+#### Update: `/notes/[documentId]/edit`
+
+Update is structurally similar to create — same form, same FormData parsing — with two differences: the page preloads the current note so the form is prefilled, and the Server Action is pre-bound to the note's `documentId` via `Function.prototype.bind`.
+
+```tsx
+// frontend/app/notes/[documentId]/edit/page.tsx (excerpt)
+import { query } from '@/lib/apollo-client';
+import { NOTE_DETAIL, TAGS } from '@/lib/graphql';
+import { blocksToText } from '@/lib/blocks';
+import { updateNoteAction } from './actions';
+
+export default async function EditNotePage({
+  params,
+}: {
+  params: Promise<{ documentId: string }>;
+}) {
+  const { documentId } = await params;
+
+  const [noteRes, tagsRes] = await Promise.all([
+    query({ query: NOTE_DETAIL, variables: { documentId } }),
+    query({ query: TAGS }),
+  ]);
+
+  const note = noteRes.data?.note;
+  if (!note) notFound();
+
+  const allTags = tagsRes.data?.tags ?? [];
+  const selectedTagIds = new Set(note.tags.map((t) => t.documentId));
+  const defaultContent = blocksToText(note.content);
+
+  // Bind documentId into the action so the form handler only receives FormData
+  const boundAction = updateNoteAction.bind(null, documentId);
+
+  return (
+    <form action={boundAction}>
+      <input name="title" defaultValue={note.title} required />
+      <textarea name="content" defaultValue={defaultContent} rows={12} />
+      {allTags.map((t) => (
+        <label key={t.documentId}>
+          <input
+            type="checkbox"
+            name="tagIds"
+            value={t.documentId}
+            defaultChecked={selectedTagIds.has(t.documentId)}
+          />
+          {t.name}
+        </label>
+      ))}
+      <button type="submit">Save changes</button>
+    </form>
+  );
+}
+```
+
+The `.bind(null, documentId)` pattern is how a Server Action receives additional arguments beyond the `FormData` payload. The browser only sends the form data; the `documentId` is captured on the server side and injected into the action call.
+
+The Server Action itself uses the `updateNote` Shadow CRUD mutation:
+
+```typescript
+// frontend/app/notes/[documentId]/edit/actions.ts
+'use server';
+
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+import { getClient } from '@/lib/apollo-client';
+import { UPDATE_NOTE } from '@/lib/graphql';
+import { textToBlocks } from '@/lib/blocks';
+
+export async function updateNoteAction(documentId: string, formData: FormData) {
+  const title = String(formData.get('title') ?? '').trim();
+  const content = String(formData.get('content') ?? '');
+  const tagIds = formData.getAll('tagIds').map(String).filter(Boolean);
+
+  if (!title) return { error: 'Title is required.' };
+
+  await getClient().mutate({
+    mutation: UPDATE_NOTE,
+    variables: {
+      documentId,
+      data: {
+        title,
+        content: textToBlocks(content),
+        tags: tagIds,
+      },
+    },
+  });
+
+  revalidatePath('/notes');
+  revalidatePath(`/notes/${documentId}`);
+  redirect(`/notes/${documentId}`);
+}
+```
+
+And the operation definition:
+
+```typescript
+// frontend/lib/graphql.ts (excerpt)
+export const UPDATE_NOTE = gql`
+  mutation UpdateNote($documentId: ID!, $data: NoteInput!) {
+    updateNote(documentId: $documentId, data: $data) {
+      documentId
+    }
+  }
+`;
+```
+
+A few points worth noting about updates against Strapi:
+
+- `NoteInput` is the same type `createNote` uses. For an update, every field is optional at the application level — any attribute not included in the `data` object is left unchanged on the server. The `NoteInput` type itself is generated with strict types for each attribute; TypeScript does not enforce which subset you send.
+- Replacing a relation (`tags`) by passing a new array of `documentId`s overwrites the relation. To add or remove individual tags without touching the others, Strapi exposes `tags: { connect: [...], disconnect: [...] }` input objects instead.
+- The Server Action uses `revalidatePath` for both `/notes` and `/notes/[documentId]` before redirecting so both the list and the detail page reflect the change immediately after navigation.
+
+#### Why there is no hard-delete flow
+
+The schema deliberately has no `deleteNote` mutation. Step 4 removed it with `extension.shadowCRUD('api::note.note').disableAction('delete')`, and Step 8 added `archiveNote` as the user-facing "discard" action. The reasoning:
+
+- Notes are user content; accidentally deleting them is worse than accidentally archiving them.
+- Archive is reversible — a future "restore from archive" feature is a simple mutation that flips `archived` back to `false`.
+- The archived list is still queryable (with the `X-Include-Archived` policy gate from Step 3), which makes it easy to surface archived notes in a dedicated page.
+
+If a hard delete is required, it can be re-enabled either by removing the `disableAction('delete')` line (which brings `Mutation.deleteNote` back) or by adding a custom `permanentlyDelete` mutation that checks ownership and then calls `strapi.documents('api::note.note').delete({ documentId })`. The custom-mutation route is usually preferable because it lets you attach additional checks (ownership, two-step confirmation, audit logging) that the generic Shadow CRUD mutation does not.
 
 The full request flow is shown below:
 

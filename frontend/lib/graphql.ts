@@ -96,6 +96,14 @@ export const CREATE_NOTE = gql`
   }
 `;
 
+export const UPDATE_NOTE = gql`
+  mutation UpdateNote($documentId: ID!, $data: NoteInput!) {
+    updateNote(documentId: $documentId, data: $data) {
+      documentId
+    }
+  }
+`;
+
 export const TOGGLE_PIN = gql`
   mutation TogglePin($documentId: ID!) {
     togglePin(documentId: $documentId) {

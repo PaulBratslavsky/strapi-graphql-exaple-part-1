@@ -1,8 +1,9 @@
 'use client';
 
+import Link from 'next/link';
 import { useTransition } from 'react';
-import { Archive, Copy, Pin, PinOff } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { Archive, Copy, Pencil, Pin, PinOff } from 'lucide-react';
+import { Button, buttonVariants } from '@/components/ui/button';
 import {
   togglePinAction,
   archiveNoteAction,
@@ -20,6 +21,13 @@ export function NoteActions({
 
   return (
     <div className="flex flex-wrap gap-2">
+      <Link
+        href={`/notes/${documentId}/edit`}
+        className={buttonVariants({ variant: 'outline', size: 'sm' })}
+      >
+        <Pencil className="h-4 w-4" />
+        Edit
+      </Link>
       <Button
         variant="outline"
         size="sm"
