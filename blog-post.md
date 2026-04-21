@@ -728,6 +728,264 @@ Two points worth noting:
 1. **Return the mutated entity.** Clients expect mutations to return the affected object so they can update their cache without an additional fetch.
 2. **Always `populate` relations that are selected in the response.** Without `populate`, the resolver returns `null` for those relations. Apollo then caches that `null`, and subsequent reads for the same entity render as if the relation were empty.
 
+## Testing the schema in the Apollo Sandbox
+
+Before wiring the frontend to the schema, it is worth validating every query and mutation in the Apollo Sandbox. The Sandbox is the interactive UI served at `http://localhost:1338/graphql` in development. It provides schema introspection, autocompletion, a Variables panel for operation variables, a Headers panel for request headers, and a Response panel that shows exactly what the resolver returned.
+
+Running each operation in the Sandbox before touching the frontend catches two common classes of problem early: a misnamed field or argument that the generated `NoteInput` type does not accept, and a missing `populate` that returns `null` for a relation. Both are much easier to diagnose in the Sandbox than through Apollo Client's cache indirection.
+
+The operations below are copy-paste ready for the Sandbox. Paste the query into the **Operation** editor, paste the variables (if any) into the **Variables** tab at the bottom, and click the run button. Responses should match the shapes described.
+
+### Shadow CRUD queries
+
+**List active notes, sorted by pinned then recency.**
+
+```graphql
+query ActiveNotes {
+  notes(
+    filters: { archived: { eq: false } }
+    sort: ["pinned:desc", "updatedAt:desc"]
+  ) {
+    documentId
+    title
+    pinned
+    tags { name slug color }
+  }
+}
+```
+
+**Fetch a single note by `documentId`.**
+
+```graphql
+query Note($documentId: ID!) {
+  note(documentId: $documentId) {
+    documentId
+    title
+    content
+    tags { name slug }
+  }
+}
+```
+
+Variables:
+
+```json
+{ "documentId": "paste-a-real-documentId-here" }
+```
+
+**Find a documentId quickly** by running the list query above and copying one from the response.
+
+**List tags.**
+
+```graphql
+query Tags {
+  tags(sort: "name:asc") {
+    documentId
+    name
+    slug
+    color
+  }
+}
+```
+
+### Shadow CRUD mutations
+
+**Create a note.** The `data` argument uses the generated `NoteInput` type. Tags are referenced by their `documentId`.
+
+```graphql
+mutation CreateNote($data: NoteInput!) {
+  createNote(data: $data) {
+    documentId
+    title
+  }
+}
+```
+
+Variables:
+
+```json
+{
+  "data": {
+    "title": "Testing from the Sandbox",
+    "content": [
+      { "type": "paragraph", "children": [{ "type": "text", "text": "Hello from Apollo Sandbox." }] }
+    ],
+    "pinned": false,
+    "archived": false,
+    "tags": []
+  }
+}
+```
+
+**Update a note.**
+
+```graphql
+mutation UpdateNote($documentId: ID!, $data: NoteInput!) {
+  updateNote(documentId: $documentId, data: $data) {
+    documentId
+    title
+  }
+}
+```
+
+Variables:
+
+```json
+{
+  "documentId": "paste-a-real-documentId-here",
+  "data": { "title": "Updated title" }
+}
+```
+
+**`deleteNote` is intentionally absent.** Typing `mutation { deleteNote(...) }` into the Sandbox produces a validation error: *"Cannot query field `deleteNote` on type `Mutation`."* This confirms the `disableAction('delete')` call from Step 4 is in effect.
+
+### Custom Nexus queries
+
+**`searchNotes` — title search across active notes.**
+
+```graphql
+query SearchNotes($q: String!) {
+  searchNotes(query: $q) {
+    documentId
+    title
+    excerpt(length: 80)
+  }
+}
+```
+
+Variables:
+
+```json
+{ "q": "meeting" }
+```
+
+**`noteStats` — aggregate counts with per-tag breakdown.**
+
+```graphql
+query NoteStats {
+  noteStats {
+    total
+    pinned
+    archived
+    byTag { slug name count }
+  }
+}
+```
+
+**`notesByTag` — notes for a given tag slug.**
+
+```graphql
+query NotesByTag($slug: String!) {
+  notesByTag(slug: $slug) {
+    documentId
+    title
+    pinned
+  }
+}
+```
+
+Variables:
+
+```json
+{ "slug": "work" }
+```
+
+### Custom Nexus mutations
+
+**`togglePin`.** Each invocation flips the `pinned` flag and returns the updated note.
+
+```graphql
+mutation TogglePin($documentId: ID!) {
+  togglePin(documentId: $documentId) {
+    documentId
+    pinned
+  }
+}
+```
+
+**`archiveNote`.** Sets `archived: true` and `pinned: false`.
+
+```graphql
+mutation ArchiveNote($documentId: ID!) {
+  archiveNote(documentId: $documentId) {
+    documentId
+    archived
+    pinned
+  }
+}
+```
+
+**`duplicateNote`.** Creates a new row with the same content and tags, title suffixed with ` (copy)`.
+
+```graphql
+mutation DuplicateNote($documentId: ID!) {
+  duplicateNote(documentId: $documentId) {
+    documentId
+    title
+    tags { name }
+  }
+}
+```
+
+All three take the same variable shape:
+
+```json
+{ "documentId": "paste-a-real-documentId-here" }
+```
+
+### Testing the policy with the Headers panel
+
+The `include-archived-requires-header` policy from Step 3 rejects any `notes` query that asks for archived rows unless an `X-Include-Archived: yes` header is set. The Sandbox exposes this via its **Headers** tab (bottom of the Operation editor).
+
+**Without the header** — run:
+
+```graphql
+query { notes(filters: { archived: { eq: true } }) { title } }
+```
+
+The response contains a `PolicyError` with the message "Policy Failed".
+
+**With the header** — in the **Headers** tab, add:
+
+| Key | Value |
+|---|---|
+| `X-Include-Archived` | `yes` |
+
+Re-run the same query. The response now contains the archived notes. This confirms the policy is reading the header and making its decision accordingly.
+
+### Confirming computed fields
+
+The `wordCount`, `readingTime`, and `excerpt` fields from Step 5 are selectable on any `Note`. A quick check:
+
+```graphql
+query ComputedFields {
+  notes(pagination: { pageSize: 3 }) {
+    title
+    wordCount
+    readingTime
+    excerpt(length: 60)
+  }
+}
+```
+
+Every note should return non-null values for all three fields. If `wordCount` is `0` across the board, the resolver is being called but `blocksToText` is not extracting from the content — worth investigating before moving to the frontend.
+
+### Confirming the hidden field
+
+Querying `internalNotes` on a note should fail at the validation step:
+
+```graphql
+query { notes { documentId internalNotes } }
+```
+
+Expected error: *"Cannot query field `internalNotes` on type `Note`."* If this field were still present, the `disableOutput` call from Step 4 would not be taking effect.
+
+### Introspection
+
+The Sandbox's left panel (Schema / Documentation) is populated from the same introspection query any GraphQL tool would use. Explore it once after registering the custom extensions to confirm `NoteStats`, `TagCount`, `searchNotes`, `notesByTag`, `togglePin`, `archiveNote`, and `duplicateNote` all appear, and that the `NoteFiltersInput` no longer mentions `internalNotes`. The schema browser is the fastest way to verify all Step 1 through Step 8 changes are live.
+
+Once every operation above returns the expected result, the backend contract is validated and the frontend work in Step 9 can proceed against a schema you have already verified by hand.
+
 ## Step 9: Consuming the schema from Next.js
 
 *Reference: [Apollo Client — Next.js App Router](https://www.apollographql.com/docs/react/integrations/next-js/) · [Next.js — Server Actions](https://nextjs.org/docs/app/api-reference/directives/use-server) · [Strapi — GraphQL query examples](https://docs.strapi.io/cms/plugins/graphql#graphql-api-documentation).*
