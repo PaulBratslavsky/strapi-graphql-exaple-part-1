@@ -115,14 +115,7 @@ export default config;
 
 **`depthLimit` and `amountLimit`.** Without these, a client can submit a query that is either deeply nested or returns a very large page, and the server will attempt to execute it. A nested query such as `notes { tags { notes { tags { notes { ... } } } } }` can force the server to perform many joins and fetch large related datasets for every traversal, which can exhaust database connections and memory. `depthLimit` rejects the query before execution if it exceeds the configured depth. `amountLimit` caps the number of items any single resolver returns. Together they prevent a single malformed or malicious query from consuming disproportionate resources. Reasonable starting values are 10 and 100; tune them based on the real query shapes your clients send.
 
-**`landingPage`.** When you visit `http://localhost:1337/graphql` in a browser, Strapi v5 serves the **Apollo Sandbox** — an interactive UI for writing queries, inspecting the schema, and running mutations.
-
-A short terminology note, because the two names commonly used for this feature are not interchangeable:
-
-- **GraphQL Playground** was an older interactive tool (originally maintained by Prisma) that earlier versions of the plugin served. The Strapi v4 and earlier configuration option for it was `playgroundAlways`. That option is deprecated in v5 and will be removed in v6.
-- **Apollo Sandbox** is the current UI that Strapi v5 serves. It is controlled by the `landingPage` option. The term "landing page" refers to what the Strapi server renders when someone navigates to the `/graphql` endpoint in a browser; in v5 that page *is* the Apollo Sandbox.
-
-The UI is useful during development but should not be exposed in production, for several reasons:
+**`landingPage`.** When you visit `http://localhost:1337/graphql` in a browser, Strapi v5 serves the **Apollo Sandbox** — an interactive UI for writing queries, inspecting the schema, and running mutations. It is useful during development but should not be exposed in production, for several reasons:
 
 - The Sandbox is a human-facing tool. Programmatic clients do not need it; they POST GraphQL documents to the endpoint directly.
 - Combined with schema introspection (see below), the Sandbox gives anyone with a browser a complete, searchable map of every type, field, filter operator, and mutation your API exposes. This information is often useful for attackers during reconnaissance and provides no benefit to legitimate clients.
