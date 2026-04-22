@@ -1,7 +1,7 @@
 **TL;DR**
 
 - This post builds a fresh Strapi v5 project from zero with the built-in example data (Article, Author, Category), installs `@strapi/plugin-graphql`, and walks through every auto-generated query and mutation the plugin exposes for those content types in the Apollo Sandbox.
-- It then introduces the customization APIs through three hands-on examples: production-grade plugin configuration (`depthLimit`, `amountLimit`, `landingPage`, introspection), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query. All three use the same extension-service and aggregator pattern the rest of the series builds on.
+- It then introduces the customization APIs through three hands-on examples: production-grade plugin configuration (`depthLimit`, `maxLimit`, `defaultLimit`, `landingPage`, introspection), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query. All three use the same extension-service and aggregator pattern the rest of the series builds on.
 - Along the way you set up the `src/extensions/graphql/` folder structure (aggregator, `computed-fields.ts`, `queries.ts`) used by every subsequent post in the series, so Part 2 only adds files, it does not refactor any you wrote here.
 - By the end you have a working Strapi project serving a customized GraphQL schema at `http://localhost:1337/graphql`, an Apollo Sandbox for testing, and the first two custom resolvers in your codebase.
 - Target audience: developers comfortable with Node and TypeScript who have not used Strapi before, or who have used Strapi's REST API but not its GraphQL plugin.
@@ -67,7 +67,7 @@ GraphQL remains a reasonable choice when your requirements push past what the ge
 
 - **Aggregations and custom response shapes.** Counting entries, grouping by a relation, or returning a payload that stitches several content types together requires a custom controller per shape in REST. In GraphQL, a custom resolver lives alongside the auto-generated schema and can return any shape the client asks for (this post shows the `searchArticles` version; Part 2 goes further with a `noteStats` aggregate).
 - **Multiple clients, each consuming a different slice of the schema.** When a web app, a mobile app, and a third-party integration all talk to the same backend but each wants a different subset of fields and relations, GraphQL lets each client declare its own query shape without the server negotiating a lowest-common-denominator REST response.
-- **Runtime schema introspection and schema-driven tooling.** Apollo Sandbox, IDE plugins, and GraphQL-specific code generators all work off the live schema without any extra step. Strapi's REST API has an OpenAPI spec too, but GraphQL's introspection protocol is more tightly coupled to the running server.
+- **Runtime schema introspection and schema-driven tooling.** Apollo Sandbox, IDE plugins, and GraphQL-specific code generators all work off the live schema without any extra step.
 - **Per-operation TypeScript types via code generation.** With GraphQL Code Generator (or a similar code-generation step), every query and mutation in your client code gets its own TypeScript type, matching exactly the fields you selected and the relations you traversed. If you add a field to a query, the generated type updates and every place that reads the result is type-checked against the new shape. `@strapi/client` is written in TypeScript and has typed method signatures, but it does not derive response types from your specific content types, the returned `data` is not shape-aware against your project, so you end up applying types by hand (or leaving them generic) at the call site. GraphQL plus a code generator is the closest you get to end-to-end, project-specific type safety without maintaining those types yourself.
 
 None of this is a function of project size. Pick REST if your clients consume the API in a stable, well-understood shape and you want the simplest possible request ergonomics. Pick GraphQL if you are already reaching for aggregations, multiple client types, or custom resolvers. The rest of this post is about the GraphQL surface, when you want it, what Strapi exposes for you, and how to extend it.
@@ -143,7 +143,7 @@ Strapi is a headless CMS. Install the GraphQL plugin and it generates a full Gra
 
 Before reading a deep-dive on custom resolvers, middlewares, policies, and computed fields, it helps to have hands-on experience with what Shadow CRUD gives you for free. This post is that experience. It produces a minimal but complete Strapi + GraphQL project, demonstrates every CRUD operation against it, and introduces the three most common customizations so the advanced material feels familiar.
 
-This is not *only* a Shadow CRUD walkthrough. By the end of the post you will also have added three customizations to the schema: plugin-level safety limits (`depthLimit` / `amountLimit` / production `landingPage` and `introspection` flags), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query wired up through the same extension-service and aggregator pattern the advanced tutorial uses. If you skip Part 1 you miss the customization fundamentals that the rest of the series builds on.
+This is not *only* a Shadow CRUD walkthrough. By the end of the post you will also have added three customizations to the schema: plugin-level safety limits (`depthLimit` / `maxLimit` / `defaultLimit` / production `landingPage` and `introspection` flags), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query wired up through the same extension-service and aggregator pattern the advanced tutorial uses. If you skip Part 1 you miss the customization fundamentals that the rest of the series builds on.
 
 You can skip this post if **all** of the following are true:
 
@@ -447,7 +447,7 @@ Variables:
 
 ![011-mutation](img/011-mutation.png)
 
-You getting the hang of it.
+You're getting the hang of it.
 
 The `ArticleInput` type was generated from the content type. Every non-relation scalar attribute is available, and relations can be referenced by `documentId` (e.g. `author: "<documentId>"`, `category: "<documentId>"`). The `blocks` dynamic zone is accepted but requires a specific input shape per component type, out of scope for this post.
 
@@ -507,7 +507,8 @@ const config = ({
       endpoint: "/graphql",
       shadowCRUD: true,
       depthLimit: 10,
-      amountLimit: 100,
+      defaultLimit: 25,
+      maxLimit: 100,
       landingPage: env("NODE_ENV") !== "production",
       apolloServer: {
         introspection: env("NODE_ENV") !== "production",
@@ -520,7 +521,8 @@ export default config;
 ```
 
 - `depthLimit` caps how deeply a query can nest. Without it, a query like `articles { author { articles { author { ... } } } }` can exhaust the database.
-- `amountLimit` caps how many entries any single resolver returns.
+- `defaultLimit` sets the default page size used when a query does not pass `pagination`. Setting this keeps casual queries bounded without forcing every client to specify pagination.
+- `maxLimit` caps how many entries any single resolver is allowed to return, regardless of what the client asks for. Without it, a client can request an unbounded number of rows in a single query.
 - `landingPage` controls whether the Apollo Sandbox is served at `/graphql`. Keep it on in development; turn it off in production so the schema is not handed to anyone with a browser.
 - `apolloServer.introspection` controls whether the schema can be introspected. Same reasoning as `landingPage`.
 
@@ -702,6 +704,7 @@ export default function queries({
               return strapi.documents("api::article.article").findMany({
                 filters: { title: { $containsi: args.q } },
                 sort: ["publishedAt:desc"],
+                status: "published",
               });
             },
           });
@@ -720,6 +723,7 @@ Key points:
 - `nexus.extendType({ type: 'Query', ... })` adds a field to the top-level `Query` type. That field becomes a new top-level GraphQL query: `searchArticles(q: String!): [Article!]`.
 - The resolver calls `strapi.documents('api::article.article').findMany(...)`, the Document Service API, Strapi v5's recommended way to read and write content entries.
 - `$containsi` is a case-insensitive substring filter. The full set of operators matches those available to Shadow CRUD filters.
+- `status: "published"` is passed explicitly because the Document Service returns the draft version by default. Shadow CRUD's auto-generated `articles` query hides drafts from the public API for you; in a custom resolver you opt in yourself.
 - The `queries` factory takes `{ nexus, strapi }` because it needs the `strapi` instance to run the Document Service call. `computedFields` only needed `{ nexus }` because its resolvers only inspect the parent row.
 
 Register it in the aggregator. Because `queries` needs `strapi`, wrap it in a named inner function rather than passing it directly:
