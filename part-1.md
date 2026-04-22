@@ -1,32 +1,80 @@
 **TL;DR**
 
-- This post builds a fresh Strapi v5 project from zero with the built-in example data (Article, Author, Category), installs the GraphQL plugin, and walks through every auto-generated query and mutation the plugin exposes for those content types.
-- Once the auto-generated schema is working, we add three small customizations: plugin limits, one computed field on `Article`, and one custom `searchArticles` query. Nothing advanced — just enough to see the shape of the customization APIs.
-- By the end you will have a working Strapi project serving a GraphQL schema at `http://localhost:1337/graphql`, with an Apollo Sandbox for testing, and a mental model of Shadow CRUD that prepares you for the in-depth customization tutorial.
+- This post builds a fresh Strapi v5 project from zero with the built-in example data (Article, Author, Category), installs `@strapi/plugin-graphql`, and walks through every auto-generated query and mutation the plugin exposes for those content types in the Apollo Sandbox.
+- It then introduces the customization APIs through three hands-on examples: production-grade plugin configuration (`depthLimit`, `amountLimit`, `landingPage`, introspection), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query. All three use the same extension-service and aggregator pattern the rest of the series builds on.
+- Along the way you set up the `src/extensions/graphql/` folder structure (aggregator, `computed-fields.ts`, `queries.ts`) used by every subsequent post in the series — so Part 2 only adds files, it does not refactor any you wrote here.
+- By the end you have a working Strapi project serving a customized GraphQL schema at `http://localhost:1337/graphql`, an Apollo Sandbox for testing, and the first two custom resolvers in your codebase.
 - Target audience: developers comfortable with Node and TypeScript who have not used Strapi before, or who have used Strapi's REST API but not its GraphQL plugin.
-- No frontend code. No authentication. No database beyond SQLite. The goal is understanding the backend surface first; a frontend tutorial and an auth tutorial are linked at the end.
 
 ## What is GraphQL?
 
-If you have built a frontend against a REST API, you have probably hit this problem: the list page needs posts with their tags, but the `/posts` endpoint only returns posts. You either make a second request for every post's tags, or you add a query-string flag like `/posts?include=tags`, or you ask the backend team to change the endpoint. Every REST API invents its own solution.
+GraphQL is a query language and runtime for APIs. It was developed at Facebook in 2012 and open-sourced in 2015 — it came out of the internal challenge of delivering structured data to mobile clients without forcing every screen into the response shape a particular REST endpoint happened to return. The design goal was that the **client** should describe, in one request, exactly the fields and relations it needs, and the server should return precisely that shape against a published schema.
 
-It is worth noting that Strapi's REST API already addresses this specific pain relatively well. The `populate` parameter controls which relations come back in the response, the `fields` parameter selects which attributes to include, and the `filters` parameter expresses the same operators (`eq`, `ne`, `contains`, `in`, and so on) you will see in GraphQL. The Strapi docs cover both:
+In a GraphQL server there is one endpoint — conventionally `/graphql` — and a typed schema that lists every object type, field, argument, and relation the server can expose. Clients send a query document that walks the schema, the server validates it against the schema, and the response mirrors the shape of the query.
+
+Strapi's REST API already supports the same kind of response shaping. The [Strapi v5 REST parameters reference](https://docs.strapi.io/cms/api/rest/parameters) documents seven query-string parameters that work on any collection or single-type endpoint:
+
+- `populate` — controls which relations, components, or dynamic zones come back.
+- `fields` — restricts which scalar attributes appear in the response.
+- `filters` — narrows results with operators like `$eq`, `$ne`, `$contains`, `$in`, and the same logical operators you will see in GraphQL.
+- `sort` — orders results by one or more attributes.
+- `pagination` — page-based or offset-based paging.
+- `locale` — selects which locale's content is returned.
+- `status` — draft or published.
+
+You can confirm the shaping parameters from a terminal against the project you will build in this post:
+
+```bash
+# No relations in the response (the default).
+curl 'http://localhost:1337/api/articles'
+
+# `populate=category` brings the category relation back for every article.
+curl 'http://localhost:1337/api/articles?populate=category'
+
+# `fields` restricts which scalar attributes are returned.
+curl 'http://localhost:1337/api/articles?populate=category&fields[0]=title'
+```
+
+The Strapi docs cover both:
 
 - [REST API — `populate` and field selection](https://docs.strapi.io/cms/api/rest/populate-select)
 
-With those, `GET /api/posts?populate=tags&fields[0]=title&fields[1]=body` gets you posts with their tags in one request and only the two fields you asked for. So why choose GraphQL at all if REST can do most of the same things in Strapi?
+With those, `GET /api/articles?populate=category&fields[0]=title&fields[1]=description` gets you articles with their category in one request and only the two fields you asked for. So why choose GraphQL at all if REST can do most of the same things in Strapi?
 
-A few reasons remain:
+Honestly — in most cases it is not necessary. Strapi's REST API combined with `qs` on the client, or the official [`@strapi/client`](https://docs.strapi.io/cms/api/client) SDK, is enough for the majority of applications built on Strapi:
 
-- **The query shape is declarative and self-contained.** A GraphQL query is one document that describes the full response. REST responses are controlled by separate query-string parameters that are easy to get wrong (`populate[0]=tags&populate[1]=author&fields[0]=title...`) and harder to review in code.
-- **Tooling reads the schema automatically.** Apollo Sandbox, IDE plugins, and code generators all introspect the GraphQL schema and give you autocompletion, typechecking, and inline documentation out of the box. REST requires a separate OpenAPI spec — Strapi has one, but it is not as tightly coupled to the runtime.
-- **Composability is uniform.** In GraphQL, filters, sorting, relations, and custom resolvers all share the same document shape. In REST you mix path segments, query-string flags, and route-specific conventions.
+```ts
+// With qs
+import qs from 'qs';
+const query = qs.stringify(
+  { populate: ['category', 'author'], fields: ['title'] },
+  { encodeValuesOnly: true },
+);
+// → "populate[0]=category&populate[1]=author&fields[0]=title"
 
-For small projects, Strapi's REST API is often enough. GraphQL becomes more valuable as the schema grows, as multiple client applications consume the same backend, or as you want end-to-end type safety between the server and your TypeScript client.
+// With the Strapi client SDK
+import { strapi } from '@strapi/client';
+const client = strapi({ baseURL: 'http://localhost:1337/api' });
+const articles = await client.collection('articles').find({
+  populate: ['category', 'author'],
+  fields: ['title'],
+});
+```
+
+Between those two, you get shaping (`populate`, `fields`), filtering, sorting, pagination, draft/publish handling, and locale selection without touching GraphQL at all. Many production Strapi deployments — small and large — ship on REST alone.
+
+GraphQL remains a reasonable choice when your requirements push past what the generated REST surface covers comfortably. Specifically:
+
+- **Aggregations and custom response shapes.** Counting entries, grouping by a relation, or returning a payload that stitches several content types together requires a custom controller per shape in REST. In GraphQL, a custom resolver lives alongside the auto-generated schema and can return any shape the client asks for (this post shows the `searchArticles` version; Part 2 goes further with a `noteStats` aggregate).
+- **Multiple clients, each consuming a different slice of the schema.** When a web app, a mobile app, and a third-party integration all talk to the same backend but each wants a different subset of fields and relations, GraphQL lets each client declare its own query shape without the server negotiating a lowest-common-denominator REST response.
+- **Runtime schema introspection and schema-driven tooling.** Apollo Sandbox, IDE plugins, and GraphQL-specific code generators all work off the live schema without any extra step. Strapi's REST API has an OpenAPI spec too, but GraphQL's introspection protocol is more tightly coupled to the running server.
+- **Per-operation TypeScript types.** With GraphQL Code Generator (or a similar code-generation step), every query and mutation in your client code gets its own TypeScript type — matching exactly the fields you selected and the relations you traversed. If you add a field to a query, the generated type updates and every place that reads the result is type-checked against the new shape. `@strapi/client` is typed at the content-type level, but it does not know which subset of fields you passed to `fields` or which relations you passed to `populate`, so the returned object stays a broader, hand-maintained shape. GraphQL's per-operation types are the closest you get to end-to-end type safety without writing those types yourself.
+
+None of this is a function of project size. Pick REST if your clients consume the API in a stable, well-understood shape and you want the simplest possible request ergonomics. Pick GraphQL if you are already reaching for aggregations, multiple client types, or custom resolvers. The rest of this post is about the GraphQL surface — when you want it, what Strapi exposes for you, and how to extend it.
 
 GraphQL is a different way to expose data. Instead of many endpoints that each return a fixed response shape, a GraphQL server exposes **one endpoint** (usually `/graphql`) and the client sends a **query** that says exactly what it wants. The server returns exactly that shape.
 
-Here is the same "posts with tags" request written as a GraphQL query:
+Here is the same "articles with their author and category" request written as a GraphQL query:
 
 ```graphql
 query {
@@ -66,7 +114,7 @@ And the response:
 }
 ```
 
-No second request for tags. No over-fetching of fields the UI never displays. No `?include` conventions.
+No second request for the related category or author. No over-fetching of fields the UI never displays. No bracket-indexed populate keys to build by hand.
 
 ### Three terms to know
 
@@ -83,7 +131,7 @@ There are a few more terms (resolvers, subscriptions, fragments) but you will no
 Summarized as four practical reasons:
 
 - **The client controls the response shape.** Different screens can ask for different fields without the backend changing.
-- **Related data comes in one request.** Nested fields (like `posts → tags`) are fetched in the same round trip.
+- **Related data comes in one request.** Nested fields (like `articles → author`) are fetched in the same round trip.
 - **The schema is self-describing.** Tools like the Apollo Sandbox read the schema and offer autocompletion, inline documentation, and validation out of the box. There is no separate API reference to keep in sync.
 - **Errors surface early.** Misspelled fields, wrong argument types, and missing required values are rejected at parse time, before any business logic runs.
 
@@ -95,7 +143,15 @@ Strapi is a headless CMS. Install the GraphQL plugin and it generates a full Gra
 
 Before reading a deep-dive on custom resolvers, middlewares, policies, and computed fields, it helps to have hands-on experience with what Shadow CRUD gives you for free. This post is that experience. It produces a minimal but complete Strapi + GraphQL project, demonstrates every CRUD operation against it, and introduces the three most common customizations so the advanced material feels familiar.
 
-If you already have a running Strapi v5 project with the GraphQL plugin installed and you know what `createArticle(data: ArticleInput!)` means, skip this and go read the advanced tutorial.
+This is not *only* a Shadow CRUD walkthrough. By the end of the post you will also have added three customizations to the schema: plugin-level safety limits (`depthLimit` / `amountLimit` / production `landingPage` and `introspection` flags), a computed `wordCount` field on `Article` via `nexus.extendType`, and a custom top-level `searchArticles` query wired up through the same extension-service and aggregator pattern the advanced tutorial uses. If you skip Part 1 you miss the customization fundamentals that the rest of the series builds on.
+
+You can skip this post if **all** of the following are true:
+
+- you already have a Strapi v5 project with `@strapi/plugin-graphql` installed and running;
+- you are comfortable running the auto-generated queries and mutations in the Apollo Sandbox;
+- you have written at least one `nexus.extendType` factory and registered it through the extension service.
+
+If any of those are new to you, start here.
 
 ## Prerequisites
 
