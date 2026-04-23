@@ -1,3 +1,13 @@
+> **Part 1 of a 4-part series on building with GraphQL, Strapi v5, and Next.js 16.** Each part builds directly on the project from the previous post, so keep an eye out as we release them:
+>
+
+- **Part 1 (this post)**, GraphQL basics with Strapi v5. Fresh install, a full Shadow CRUD tour, and your first custom resolvers.
+- **Part 2**, Advanced backend customization. A `Note` + `Tag` model, middlewares and policies, Shadow CRUD restrictions, custom queries, and custom mutations.
+- **Part 3**, Next.js 16 frontend. Apollo Client on the App Router: Server Component reads, Server Action writes, typed operations via codegen.
+- **Part 4**, Users and per-user content. Authentication, an ownership model, and two-layer authorization (read middlewares, write policies).
+
+New to Strapi or GraphQL? Start here. Already have Strapi and the GraphQL plugin running? Skim Part 1, then jump to Part 2.
+
 **TL;DR**
 
 - This post builds a fresh Strapi v5 project from zero with the built-in example data (Article, Author, Category), installs `@strapi/plugin-graphql`, and walks through every auto-generated query and mutation the plugin exposes for those content types in the Apollo Sandbox.
