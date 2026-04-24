@@ -449,7 +449,7 @@ Add this block to the bottom of `lib/graphql.ts`:
 ```typescript
 export const TAGS = gql`
   query Tags {
-    tags(sort: "name:asc") {
+    tags(sort: ["name:asc"]) {
       documentId
       name
       slug

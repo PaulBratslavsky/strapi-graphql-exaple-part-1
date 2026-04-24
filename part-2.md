@@ -55,7 +55,7 @@ The note-taking model has two collection types:
 The customizations applied to that model, in the order this post introduces them:
 
 1. Prevent hard deletes, hide `internalNotes` from the public schema, and close the filter side channel on it.
-2. Log every call to `Query.notes`, attach a public cache hint, and gate archived queries behind an HTTP header.
+2. Log every call to `Query.notes` with a timing middleware, and gate archived queries behind an HTTP header via a named policy.
 3. Add three computed fields to `Note`: `wordCount`, `readingTime`, and `excerpt(length: Int)`.
 4. Introduce two brand-new object types, `NoteStats` and `TagCount`, for aggregate responses.
 5. Add three custom queries: `searchNotes`, `noteStats`, and `notesByTag`.
@@ -263,10 +263,10 @@ Click **Save**
 Create three Note entries through **Content Manager**, **Note**, **Create new entry**. For each note:
 
 - Pick a title like `Weekly review`, `Gift ideas`, or `Side-project backlog`.
-- In **content**, add a paragraph or two of text. The exact wording is not important, but make each note at least a sentence long so `wordCount` and `readingTime` return non-zero values in Step 7.
+- In **content**, add a paragraph or two of text. The exact wording is not important, but make each note at least a sentence long so `wordCount` returns a real count in Step 7. (`readingTime` uses `Math.max(1, ...)` so it is always at least 1, even on an empty note.)
 - Toggle `pinned` on for one of the three, leave the others off.
 - Leave `archived` off for all of them. You can flip one to `archived: true` later when testing the archive policy.
-- Fill `internalNotes` with anything, for example `moderator flag: low priority`. This field will be hidden from public GraphQL in Step 5, so whatever you put here will only appear in the admin UI.
+- Fill `internalNotes` with anything, for example `moderator flag: low priority`. The `private: true` flag you set on this field in Step 2 keeps it out of the public GraphQL and REST responses entirely, so whatever you put here only appears in the admin UI.
 - Under **Tags**, add one or two tags from the dropdown.
 - Click **Save**.
 
@@ -334,7 +334,7 @@ Both are functions that run around a resolver, but they answer different questio
 
 **Middlewares answer "what should happen before and after?"** Per [the Strapi docs](https://docs.strapi.io/cms/backend-customization/middlewares), middlewares "alter the request or response flow at application or API levels." A middleware wraps the resolver call: it can run code before, call `next(...)` to proceed, and run code after with the result in hand. Middlewares are for observability (timing, logging, tracing), response augmentation (cache hints, CORS headers, injected fields), and transformation. They are not the right tool for rejecting unauthorized requests (that is what policies are for).
 
-The GraphQL plugin exposes both through the same `resolversConfig` key, described in [the plugin docs](https://docs.strapi.io/cms/plugins/graphql): `middlewares` is an array of functions or registered references, and `policies` is the same shape. The two arrays run in sequence per request: policies first (any `false` return short-circuits the request), then middlewares (each wraps the chain), then the resolver.
+The GraphQL plugin exposes both through the same `resolversConfig` key, described in [the plugin docs](https://docs.strapi.io/cms/plugins/graphql): `middlewares` is an array of functions or registered references, and `policies` is the same shape. In the resolver wrapper the plugin **appends the policy chain after the user middlewares**, so the actual order at request time is: user middlewares wrap around the policy chain, and the policy chain runs immediately before the resolver. Concretely: middleware A runs its pre-`next()` code, then middleware B runs its pre-`next()` code, then each policy runs in order (a `false` short-circuits here), then the resolver, then each middleware's post-`next()` code unwinds.
 
 ### What this step builds
 
@@ -392,8 +392,8 @@ export default function middlewaresAndPolicies() {
 
 The two call signatures to memorize:
 
-- **Middleware**: `async (next, parent, args, context, info) => next(parent, args, context, info)`. Call `next(...)` to continue the chain. Wrap before and after with whatever you need (timing, logging, cache hints, result transformation).
-- **Policy**: `(policyContext, config, { strapi }) => boolean`. Return `false` to reject. Policies run **before** the resolver; middlewares run **around** it.
+- **Middleware**: `async (next, parent, args, context, info) => next(parent, args, context, info)`. Call `next(...)` to continue the chain. Wrap before and after with whatever you need (timing, logging, response augmentation, result transformation).
+- **Policy**: `(policyContext, config, { strapi }) => boolean | undefined`. Return `false` to reject; `true` or `undefined` means allow. Policies sit **between** the user middlewares and the resolver — user middlewares wrap the policy chain, and the policy chain wraps the resolver.
 
 Inline policy functions do not work inside `resolversConfig` in Strapi v5. The configuration expects a registered policy name of the form `global::<filename>` (for policies in `src/policies/`) or `api::<api>.<filename>` (for API-scoped policies).
 
@@ -513,7 +513,7 @@ curl -s "http://localhost:1337/api/notes?filters\[archived\]\[\$eq\]=true"
 
 If the rule is genuinely "no one can read archived rows without the header, regardless of API," there are two ways to cover REST as well:
 
-1. **Register the same policy on the REST route.** Because [`policyContext` is designed to work for both REST and GraphQL](https://docs.strapi.io/cms/backend-customization/policies), the function in `src/policies/include-archived-requires-header.ts` can be reused verbatim. Edit `src/api/note/routes/note.ts`:
+1. **Register the same policy on the REST route (with one extension).** The policy file in `src/policies/include-archived-requires-header.ts` was written to read `policyContext.args.filters.archived`, which is the GraphQL-resolver argument shape. On a Koa route, `policyContext` is the Koa `ctx` directly, so the archived filter lives at `ctx.query` in REST-style syntax (e.g. `?filters[archived][$eq]=true`). Reusing the policy for REST needs a small second branch that checks that shape as well. Once the policy handles both, wire it into `src/api/note/routes/note.ts`:
 
    ```typescript
    import { factories } from "@strapi/strapi";
@@ -530,7 +530,7 @@ If the rule is genuinely "no one can read archived rows without the header, rega
 
 2. **Move the rule into a global middleware** at `config/middlewares.ts` that inspects the request URL / body for archived filters and rejects before any router runs. This is heavier (you have to parse both the REST querystring syntax and the GraphQL document) but guarantees both paths are covered from one place.
 
-The per-resolver policy in `resolversConfig` is the right fit for rules that are **inherently GraphQL-shaped** (e.g. "reject this query if the selection set is too deep"). For rules that are really data-access rules, pair them with REST either through the route config above or through a global middleware. The same logic applies to the middlewares in this file: the timing log and cache hint are GraphQL-specific by design, so they live here and nowhere else.
+The per-resolver policy in `resolversConfig` is the right fit for rules that are **inherently GraphQL-shaped** (e.g. "reject this query if the selection set is too deep"). For rules that are really data-access rules, pair them with REST either through the route config above or through a global middleware. The same logic applies to the middlewares in this file: the timing log is GraphQL-specific by design, so it lives here and nowhere else.
 
 > **Looking ahead to Part 4.** When authentication lands and we add a per-user ownership check so one user cannot edit another user's notes, that check absolutely must cover both REST and GraphQL: missing the REST side means every authenticated user can `PUT /api/notes/:id` against anyone else's row. Part 4 builds `is-owner` as a **global middleware** in `config/middlewares.ts`, not as a `resolversConfig` policy, for exactly the reason this subsection describes. Global middleware is the right home for any rule that has to hold across both APIs, and ownership is the textbook case.
 
@@ -663,7 +663,7 @@ query ComputedNoteFields {
 
 ![012-computed-field-query.png](img/part-2/012-computed-field-query.png)
 
-Every note should return non-zero values. If `wordCount` is `0` across the board, the resolver is being called but `content` is empty or null. Open a note in the admin UI and confirm there is actual text in the markdown editor, or query `notes { content }` and inspect the raw string.
+Every note should return a sensible `wordCount` (zero only for an empty note) and a `readingTime` of at least 1 (the resolver floors at 1 via `Math.max`). If `wordCount` is `0` across the board, the resolver is being called but `content` is empty or null. Open a note in the admin UI and confirm there is actual text in the markdown editor, or query `notes { content }` and inspect the raw string.
 
 ## Step 8: Create new object types for aggregate responses
 
@@ -883,7 +883,7 @@ curl -s -X POST http://localhost:1337/graphql \
 # -> {"data":{"__type":null}}
 ```
 
-That is not a bug in your edit. Nexus strips object types that nothing in the schema references — no field uses `type: "TagCount"` anywhere yet, so Nexus treats the declaration as dead code and omits it from the final schema. This is Nexus's default unused-type elimination behavior.
+That is not a bug in your edit. The GraphQL plugin runs `pruneSchema` (from `@graphql-tools/utils`) on the assembled schema before exposing it, which removes any type that is not reachable from `Query` / `Mutation` / `Subscription` — no field uses `type: "TagCount"` anywhere yet, so it gets pruned.
 
 `TagCount` will appear in the schema the moment something references it. That happens in Step 9 when `NoteStats.byTag: [TagCount!]!` goes in and `noteStats` becomes a real query. Until then, the declaration sits in the file waiting for a consumer, which is fine — you can build the schema incrementally without every intermediate state being introspectable.
 
@@ -891,7 +891,7 @@ If you want to verify the `TagCount` declaration compiled correctly right now (e
 
 ## Step 9: Custom queries
 
-Step 9 adds three query resolvers to the same `queries.ts` file and one more object type (`NoteStats`). The resolvers demonstrate the two data-access APIs you will use day-to-day in a Strapi project, plus a raw-SQL escape hatch for the one query that neither of them can express:
+Step 9 adds three query resolvers to the same `queries.ts` file and one more object type (`NoteStats`). The resolvers themselves all go through the Document Service (Strapi's recommended high-level API), with one resolver dropping to raw SQL for a grouped aggregate as an aside. The table below is the full vocabulary of data-access APIs Strapi ships, so you know where the Query Engine fits if you ever need it:
 
 | API                                | When to use                                                                                                                                                                                                                              |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -921,7 +921,7 @@ nexus.objectType({
 
 The one notable line is `t.nonNull.list.nonNull.field("byTag", { type: "TagCount" })`. The modifier stack reads left to right: "non-null list of non-null TagCount". SDL equivalent: `byTag: [TagCount!]!`. See the table in Step 8 if you need the modifier stack as a reference.
 
-`NoteStats` references `TagCount` by name. Nexus resolves that reference at build time by looking at every other registered type. Because `TagCount` is declared in the same `types` array, the lookup succeeds and both types now have at least one consumer (`NoteStats` for `TagCount`, and the soon-to-be-added `noteStats` resolver for `NoteStats`). Neither will still be stripped by the unused-type elimination.
+`NoteStats` references `TagCount` by name. Nexus resolves that reference at build time by looking at every other registered type. Because `TagCount` is declared in the same `types` array, the lookup succeeds and both types now have at least one consumer (`NoteStats` for `TagCount`, and the soon-to-be-added `noteStats` resolver for `NoteStats`). Neither will be pruned out of the final schema.
 
 ### Step 9.2: Add `searchNotes` (Document Service API)
 
@@ -1068,6 +1068,8 @@ const byTag = (Array.isArray(rows) ? rows : []).map((r: any) => ({
 ```
 
 Don't copy this into the resolver unless you have measured a problem. Raw SQL costs you validation, lifecycle hooks, Draft & Publish awareness, and forward-compatibility with Strapi's abstractions. The link-table name (`notes_tags_lnk`) is a Strapi internal, not a public API, and could change. Reach for it when the Document Service provably cannot express the query you need, not when typing SQL feels faster.
+
+Also worth knowing: `strapi.db.connection.raw(...)` returns whatever the underlying Knex driver returns, and the shape is not the same across databases. SQLite (`better-sqlite3`, which is what Part 1 set up by default) returns a plain array of row objects — the `Array.isArray(rows)` branch above. PostgreSQL returns a `{ rows, ... }` wrapper object; with that driver you would read `rows.rows` instead and the `Array.isArray(...) ? ... : []` fallback would silently swallow real data. Knew or not, if you change databases, adjust the mapping.
 
 Your `resolversConfig` object now has three keys:
 
@@ -1479,7 +1481,7 @@ Grab a `documentId` from the previous query's response and paste it into the Var
 
 ```graphql
 query Tags {
-  tags(sort: "name:asc") {
+  tags(sort: ["name:asc"]) {
     documentId
     name
     slug
@@ -1490,7 +1492,7 @@ query Tags {
 
 ### Shadow CRUD mutations
 
-**Create a note.** `data` uses the generated `NoteInput` type. Tags are referenced by their `documentId`.
+**Create a note.** `data` uses the generated `NoteInput` type. `content` is a Markdown string (since we declared the field as `richtext` in Step 2). Tags are referenced by their `documentId`.
 
 ```graphql
 mutation CreateNote($data: NoteInput!) {
@@ -1507,12 +1509,7 @@ Variables:
 {
   "data": {
     "title": "Testing from the Sandbox",
-    "content": [
-      {
-        "type": "paragraph",
-        "children": [{ "type": "text", "text": "Hello from Apollo Sandbox." }]
-      }
-    ],
+    "content": "Hello from Apollo Sandbox.\n\nA second paragraph.",
     "pinned": false,
     "archived": false,
     "tags": []
@@ -1555,7 +1552,7 @@ query {
 }
 ```
 
-Expected error: `Cannot query field "internalNotes" on type "Note".`. If the field were still selectable, the `disableOutput()` call from Step 5 would not be taking effect.
+Expected error: `Cannot query field "internalNotes" on type "Note".`. If the field were still selectable, the `private: true` flag set on `internalNotes` in Step 2 would not be taking effect (that flag is what hides it from the GraphQL output type; Shadow CRUD's `disableOutput()` is the alternative lever covered conceptually in Step 5).
 
 Similarly, trying to filter on it should fail:
 
@@ -1721,9 +1718,9 @@ If any of the above does not match, the corresponding Step 2, 7, 8, 9, or 10 cha
 ## What you just built
 
 - A Note + Tag content model added through the Content-Type Builder with a many-to-many relation, with `internalNotes` flagged as `private: true` so Strapi hides it from both REST and GraphQL.
-- A `middlewares-and-policies.ts` factory that wraps `Query.notes` with a timing log and a cache hint, plus a named policy in `src/policies/include-archived-requires-header.ts` that blocks archived queries without a header.
+- A `middlewares-and-policies.ts` factory that wraps `Query.notes` with a timing log, plus a named policy in `src/policies/include-archived-requires-header.ts` that blocks archived queries without a header.
 - Three computed fields on `Note` (`wordCount`, `readingTime`, `excerpt`) added to the existing `computed-fields.ts`.
-- Two new object types (`TagCount`, `NoteStats`) and three custom queries (`searchNotes`, `noteStats`, `notesByTag`) added to the existing `queries.ts`. The three resolvers exercise all three Strapi data-access APIs.
+- Two new object types (`TagCount`, `NoteStats`) and three custom queries (`searchNotes`, `noteStats`, `notesByTag`) added to the existing `queries.ts`. The resolvers use the Document Service throughout, with a raw-SQL aside for the per-tag aggregate in `noteStats`.
 - A new `mutations.ts` factory with three mutations (`togglePin`, `archiveNote`, `duplicateNote`).
 - An updated aggregator that registers all three new customization factories.
 

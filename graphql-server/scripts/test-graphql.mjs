@@ -62,16 +62,28 @@ async function main() {
     process.exit(2);
   }
 
+  // Select `content` too so we exercise the richtext → String mapping
+  // referenced by the detail page and Part 3 Step 4.
   const single = await gql(
-    `query Note($documentId: ID!) { note(documentId: $documentId) { documentId title } }`,
+    `query Note($documentId: ID!) {
+       note(documentId: $documentId) { documentId title content }
+     }`,
     { documentId: firstNote.documentId },
   );
   check(
     "Fetch by documentId works",
     single?.data?.note?.documentId === firstNote.documentId,
   );
+  check(
+    "note.content returns a string or null (richtext → String)",
+    single?.data?.note?.content === null ||
+      typeof single?.data?.note?.content === "string",
+  );
 
-  const tagsResult = await gql(`{ tags(sort: "name:asc") { documentId name slug } }`);
+  // Array-form sort, matching the corrected Sandbox example in Part 2.
+  const tagsResult = await gql(
+    `{ tags(sort: ["name:asc"]) { documentId name slug } }`,
+  );
   const tagsList = tagsResult?.data?.tags ?? [];
   check("List tags returns an array", Array.isArray(tagsList));
 
@@ -110,10 +122,49 @@ async function main() {
       updated?.data?.updateNote?.title === `${createdTitle} (updated)`,
     );
 
-    // Clean up: archive the test note so state does not accumulate across runs.
-    await gql(
+    // Tag replacement: updateNote with a different `tags: [...]` array should
+    // overwrite the relation. Confirms the "full replacement" behavior the
+    // tutorial calls out in Part 3 Step 5.
+    if (tagsList[0]) {
+      await gql(
+        `mutation U($id: ID!, $data: NoteInput!) {
+           updateNote(documentId: $id, data: $data) { documentId }
+         }`,
+        { id: createdId, data: { tags: [tagsList[0].documentId] } },
+      );
+      const reread = await gql(
+        `query N($id: ID!) { note(documentId: $id) { tags { documentId } } }`,
+        { id: createdId },
+      );
+      const newTagIds = (reread?.data?.note?.tags ?? []).map(
+        (t) => t.documentId,
+      );
+      check(
+        "updateNote replaces the tags relation when a new array is passed",
+        newTagIds.length === 1 && newTagIds[0] === tagsList[0].documentId,
+      );
+    }
+
+    // Excerpt length argument: `excerpt(length: 10)` should respect the arg
+    // (up to 10 chars plus a "..." suffix when truncated).
+    const excerptCheck = await gql(
+      `query N($id: ID!) { note(documentId: $id) { excerpt(length: 10) } }`,
+      { id: createdId },
+    );
+    const ex = excerptCheck?.data?.note?.excerpt;
+    check(
+      "excerpt(length: 10) respects the argument",
+      typeof ex === "string" && ex.length <= 13,
+    );
+
+    // Archive on the primary test note (not just the duplicate from later).
+    const archivedDirect = await gql(
       `mutation A($id: ID!) { archiveNote(documentId: $id) { archived } }`,
       { id: createdId },
+    );
+    check(
+      "archiveNote sets archived=true on a fresh note",
+      archivedDirect?.data?.archiveNote?.archived === true,
     );
   }
 
@@ -189,6 +240,35 @@ async function main() {
       `notesByTag(slug: "${tagsList[0].slug}") returns an array`,
       Array.isArray(byTag?.data?.notesByTag),
     );
+
+    // notesByTag should exclude archived notes even when they have the tag.
+    const archivedProbeTitle = `Archived probe ${Date.now()}`;
+    const probe = await gql(
+      `mutation C($data: NoteInput!) {
+         createNote(data: $data) { documentId }
+       }`,
+      {
+        data: {
+          title: archivedProbeTitle,
+          content: "archived probe",
+          pinned: false,
+          archived: true,
+          tags: [tagsList[0].documentId],
+        },
+      },
+    );
+    const probeId = probe?.data?.createNote?.documentId;
+
+    const byTagAfter = await gql(
+      `query B($slug: String!) { notesByTag(slug: $slug) { documentId } }`,
+      { slug: tagsList[0].slug },
+    );
+    const ids = (byTagAfter?.data?.notesByTag ?? []).map((n) => n.documentId);
+    check(
+      "notesByTag excludes archived notes",
+      !!probeId && !ids.includes(probeId),
+    );
+    // Leave the probe archived; the next run will re-create (different title).
   }
 
   // 5. Custom mutations (toggles and duplicates; restores state on success)
