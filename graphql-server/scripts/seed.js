@@ -1,178 +1,360 @@
 'use strict';
 
-const { createStrapi, compileStrapi } = require('@strapi/strapi');
+const fs = require('fs-extra');
+const path = require('path');
+const mime = require('mime-types');
+const { categories, authors, articles, global, about } = require('../data/data.json');
 
-const TAGS = [
-  { name: 'Work', color: '#2563eb' },
-  { name: 'Personal', color: '#db2777' },
-  { name: 'Ideas', color: '#f59e0b' },
-  { name: 'Reading', color: '#10b981' },
-  { name: 'Recipe', color: '#ef4444' },
-];
+async function seedExampleApp() {
+  const shouldImportSeedData = await isFirstRun();
 
-const paragraph = (text) => ({
-  type: 'paragraph',
-  children: [{ type: 'text', text }],
-});
-
-const NOTES = [
-  {
-    title: 'Weekly review template',
-    pinned: true,
-    archived: false,
-    tagNames: ['Work'],
-    content: [
-      paragraph('What went well this week?'),
-      paragraph('What didn\'t go well?'),
-      paragraph('What will I change next week?'),
-    ],
-  },
-  {
-    title: 'Sourdough starter log',
-    pinned: true,
-    archived: false,
-    tagNames: ['Recipe', 'Personal'],
-    content: [
-      paragraph('Fed the starter at 8am with 50g flour + 50g water.'),
-      paragraph('Doubled by noon. Ready for a levain build.'),
-    ],
-  },
-  {
-    title: 'Book notes: The Pragmatic Programmer',
-    pinned: false,
-    archived: false,
-    tagNames: ['Reading', 'Work'],
-    content: [
-      paragraph('Prefer plain text. Keep knowledge in editable formats.'),
-      paragraph('Orthogonality reduces the cost of change.'),
-      paragraph('Automate everything that can be automated.'),
-    ],
-  },
-  {
-    title: 'App idea: habit streak widget',
-    pinned: false,
-    archived: false,
-    tagNames: ['Ideas'],
-    content: [
-      paragraph('Minimal home screen widget showing current streak for up to 3 habits.'),
-      paragraph('Tap to check-in. Hold to edit. Sync via iCloud.'),
-    ],
-  },
-  {
-    title: 'Meeting notes: Q2 planning kickoff',
-    pinned: false,
-    archived: false,
-    tagNames: ['Work'],
-    content: [
-      paragraph('Attendees: Pat, Sam, Kim, Alex.'),
-      paragraph('Key decision: ship GraphQL tutorial by end of May.'),
-      paragraph('Follow-ups: Sam to draft outline, Kim to gather examples.'),
-    ],
-  },
-  {
-    title: 'Grocery list',
-    pinned: false,
-    archived: false,
-    tagNames: ['Personal'],
-    content: [
-      paragraph('Oats, milk, eggs, tomatoes, basil, mozzarella, lemons.'),
-    ],
-  },
-  {
-    title: 'Thoughts on static site generators',
-    pinned: false,
-    archived: false,
-    tagNames: ['Ideas', 'Reading'],
-    content: [
-      paragraph('Astro\'s islands architecture is a nice middle ground.'),
-      paragraph('Next.js App Router is overkill for a personal blog but great for a CMS demo.'),
-      paragraph('For this tutorial, Next.js makes the Strapi integration story more realistic.'),
-    ],
-  },
-  {
-    title: 'Trip planning: Lisbon, October',
-    pinned: false,
-    archived: false,
-    tagNames: ['Personal'],
-    content: [
-      paragraph('Flights: check TAP and United fares 6-8 weeks out.'),
-      paragraph('Stay: Alfama or Principe Real.'),
-      paragraph('Must-do: Time Out Market, tram 28, day trip to Sintra.'),
-    ],
-  },
-  {
-    title: 'Old meeting notes from last year',
-    pinned: false,
-    archived: true,
-    tagNames: ['Work'],
-    content: [
-      paragraph('Archived — kept for reference but no longer relevant.'),
-    ],
-  },
-  {
-    title: 'Draft: blog post ideas',
-    pinned: false,
-    archived: true,
-    tagNames: ['Ideas'],
-    content: [
-      paragraph('Most of these were explored in other posts — archiving.'),
-    ],
-  },
-];
-
-async function run() {
-  const appContext = await compileStrapi();
-  const app = await createStrapi(appContext).load();
-
-  try {
-    const tagsByName = new Map();
-
-    for (const tag of TAGS) {
-      const existing = await app.documents('api::tag.tag').findFirst({
-        filters: { name: { $eq: tag.name } },
-      });
-      if (existing) {
-        tagsByName.set(tag.name, existing);
-        continue;
-      }
-      const created = await app.documents('api::tag.tag').create({
-        data: {
-          name: tag.name,
-          slug: tag.name.toLowerCase().replace(/\s+/g, '-'),
-          color: tag.color,
-        },
-      });
-      tagsByName.set(tag.name, created);
+  if (shouldImportSeedData) {
+    try {
+      console.log('Setting up the template...');
+      await importSeedData();
+      console.log('Ready to go');
+    } catch (error) {
+      console.log('Could not import seed data');
+      console.error(error);
     }
-
-    for (const note of NOTES) {
-      const existing = await app.documents('api::note.note').findFirst({
-        filters: { title: { $eq: note.title } },
-      });
-      if (existing) continue;
-
-      const tagIds = note.tagNames
-        .map((n) => tagsByName.get(n)?.documentId)
-        .filter(Boolean);
-
-      await app.documents('api::note.note').create({
-        data: {
-          title: note.title,
-          content: note.content,
-          pinned: note.pinned,
-          archived: note.archived,
-          tags: tagIds,
-        },
-      });
-    }
-
-    console.log(`Seeded ${TAGS.length} tags and ${NOTES.length} notes.`);
-  } finally {
-    await app.destroy();
+  } else {
+    console.log(
+      'Seed data has already been imported. We cannot reimport unless you clear your database first.'
+    );
   }
 }
 
-run().catch((err) => {
-  console.error(err);
+async function isFirstRun() {
+  const pluginStore = strapi.store({
+    environment: strapi.config.environment,
+    type: 'type',
+    name: 'setup',
+  });
+  const initHasRun = await pluginStore.get({ key: 'initHasRun' });
+  await pluginStore.set({ key: 'initHasRun', value: true });
+  return !initHasRun;
+}
+
+async function setPublicPermissions(newPermissions) {
+  // Find the ID of the public role
+  const publicRole = await strapi.query('plugin::users-permissions.role').findOne({
+    where: {
+      type: 'public',
+    },
+  });
+
+  // Create the new permissions and link them to the public role
+  const allPermissionsToCreate = [];
+  Object.keys(newPermissions).map((controller) => {
+    const actions = newPermissions[controller];
+    const permissionsToCreate = actions.map((action) => {
+      return strapi.query('plugin::users-permissions.permission').create({
+        data: {
+          action: `api::${controller}.${controller}.${action}`,
+          role: publicRole.id,
+        },
+      });
+    });
+    allPermissionsToCreate.push(...permissionsToCreate);
+  });
+  await Promise.all(allPermissionsToCreate);
+}
+
+function getFileSizeInBytes(filePath) {
+  const stats = fs.statSync(filePath);
+  const fileSizeInBytes = stats['size'];
+  return fileSizeInBytes;
+}
+
+function getFileData(fileName) {
+  const filePath = path.join('data', 'uploads', fileName);
+  // Parse the file metadata
+  const size = getFileSizeInBytes(filePath);
+  const ext = fileName.split('.').pop();
+  const mimeType = mime.lookup(ext || '') || '';
+
+  return {
+    filepath: filePath,
+    originalFileName: fileName,
+    size,
+    mimetype: mimeType,
+  };
+}
+
+async function uploadFile(file, name) {
+  return strapi
+    .plugin('upload')
+    .service('upload')
+    .upload({
+      files: file,
+      data: {
+        fileInfo: {
+          alternativeText: `An image uploaded to Strapi called ${name}`,
+          caption: name,
+          name,
+        },
+      },
+    });
+}
+
+// Create an entry and attach files if there are any
+async function createEntry({ model, entry }) {
+  try {
+    // Actually create the entry in Strapi
+    await strapi.documents(`api::${model}.${model}`).create({
+      data: entry,
+    });
+  } catch (error) {
+    console.error({ model, entry, error });
+  }
+}
+
+async function checkFileExistsBeforeUpload(files) {
+  const existingFiles = [];
+  const uploadedFiles = [];
+  const filesCopy = [...files];
+
+  for (const fileName of filesCopy) {
+    // Check if the file already exists in Strapi
+    const fileWhereName = await strapi.query('plugin::upload.file').findOne({
+      where: {
+        name: fileName.replace(/\..*$/, ''),
+      },
+    });
+
+    if (fileWhereName) {
+      // File exists, don't upload it
+      existingFiles.push(fileWhereName);
+    } else {
+      // File doesn't exist, upload it
+      const fileData = getFileData(fileName);
+      const fileNameNoExtension = fileName.split('.').shift();
+      const [file] = await uploadFile(fileData, fileNameNoExtension);
+      uploadedFiles.push(file);
+    }
+  }
+  const allFiles = [...existingFiles, ...uploadedFiles];
+  // If only one file then return only that file
+  return allFiles.length === 1 ? allFiles[0] : allFiles;
+}
+
+async function updateBlocks(blocks) {
+  const updatedBlocks = [];
+  for (const block of blocks) {
+    if (block.__component === 'shared.media') {
+      const uploadedFiles = await checkFileExistsBeforeUpload([block.file]);
+      // Copy the block to not mutate directly
+      const blockCopy = { ...block };
+      // Replace the file name on the block with the actual file
+      blockCopy.file = uploadedFiles;
+      updatedBlocks.push(blockCopy);
+    } else if (block.__component === 'shared.slider') {
+      // Get files already uploaded to Strapi or upload new files
+      const existingAndUploadedFiles = await checkFileExistsBeforeUpload(block.files);
+      // Copy the block to not mutate directly
+      const blockCopy = { ...block };
+      // Replace the file names on the block with the actual files
+      blockCopy.files = existingAndUploadedFiles;
+      // Push the updated block
+      updatedBlocks.push(blockCopy);
+    } else {
+      // Just push the block as is
+      updatedBlocks.push(block);
+    }
+  }
+
+  return updatedBlocks;
+}
+
+async function importArticles() {
+  for (const article of articles) {
+    const cover = await checkFileExistsBeforeUpload([`${article.slug}.jpg`]);
+    const updatedBlocks = await updateBlocks(article.blocks);
+
+    await createEntry({
+      model: 'article',
+      entry: {
+        ...article,
+        cover,
+        blocks: updatedBlocks,
+        // Make sure it's not a draft
+        publishedAt: Date.now(),
+      },
+    });
+  }
+}
+
+async function importGlobal() {
+  const favicon = await checkFileExistsBeforeUpload(['favicon.png']);
+  const shareImage = await checkFileExistsBeforeUpload(['default-image.png']);
+  return createEntry({
+    model: 'global',
+    entry: {
+      ...global,
+      favicon,
+      // Make sure it's not a draft
+      publishedAt: Date.now(),
+      defaultSeo: {
+        ...global.defaultSeo,
+        shareImage,
+      },
+    },
+  });
+}
+
+async function importAbout() {
+  const updatedBlocks = await updateBlocks(about.blocks);
+
+  await createEntry({
+    model: 'about',
+    entry: {
+      ...about,
+      blocks: updatedBlocks,
+      // Make sure it's not a draft
+      publishedAt: Date.now(),
+    },
+  });
+}
+
+async function importCategories() {
+  for (const category of categories) {
+    await createEntry({ model: 'category', entry: category });
+  }
+}
+
+async function importAuthors() {
+  for (const author of authors) {
+    const avatar = await checkFileExistsBeforeUpload([author.avatar]);
+
+    await createEntry({
+      model: 'author',
+      entry: {
+        ...author,
+        avatar,
+      },
+    });
+  }
+}
+
+async function importSeedData() {
+  // Allow read of application content types
+  await setPublicPermissions({
+    article: ['find', 'findOne'],
+    category: ['find', 'findOne'],
+    author: ['find', 'findOne'],
+    global: ['find', 'findOne'],
+    about: ['find', 'findOne'],
+    // Part 2 additions:
+    // Note: find, findOne, create, update (no delete; Part 2 Step 3).
+    // Tag:  find, findOne, create, update, delete (Part 2 Step 3).
+    note: ['find', 'findOne', 'create', 'update'],
+    tag: ['find', 'findOne', 'create', 'update', 'delete'],
+  });
+
+  // Part 1 entries
+  await importCategories();
+  await importAuthors();
+  await importArticles();
+  await importGlobal();
+  await importAbout();
+
+  // Part 2 entries (matches Part 2 Step 4: three tags, three notes tagged accordingly)
+  await importTagsAndNotes();
+}
+
+// Part 2 Step 4 seed data. Tags use the enumeration colors declared in Step 1;
+// notes use the richtext (Markdown) field declared in Step 2.
+const PART2_TAGS = [
+  { name: 'Work', slug: 'work', color: 'blue' },
+  { name: 'Personal', slug: 'personal', color: 'green' },
+  { name: 'Ideas', slug: 'ideas', color: 'yellow' },
+];
+
+const PART2_NOTES = [
+  {
+    title: 'Weekly review',
+    content:
+      'What went well this week?\n\nWhat did not go well?\n\nWhat will I change next week?',
+    pinned: true,
+    archived: false,
+    internalNotes: 'triage: high priority',
+    tagSlugs: ['work'],
+  },
+  {
+    title: 'Gift ideas',
+    content:
+      'Running socks for mom.\n\nCoffee subscription for dad.\n\nPaperback of The Pragmatic Programmer for Sam.',
+    pinned: false,
+    archived: false,
+    internalNotes: 'low priority',
+    tagSlugs: ['personal'],
+  },
+  {
+    title: 'Side-project backlog',
+    content:
+      'Habit streak widget.\n\nInbox-zero dashboard.\n\nReading-list browser extension.',
+    pinned: false,
+    archived: false,
+    internalNotes: 'someday/maybe',
+    tagSlugs: ['ideas', 'personal'],
+  },
+];
+
+async function importTagsAndNotes() {
+  const tagsBySlug = new Map();
+
+  for (const tag of PART2_TAGS) {
+    const existing = await strapi.documents('api::tag.tag').findFirst({
+      filters: { slug: { $eq: tag.slug } },
+    });
+    if (existing) {
+      tagsBySlug.set(tag.slug, existing);
+      continue;
+    }
+    const created = await strapi.documents('api::tag.tag').create({
+      data: tag,
+    });
+    tagsBySlug.set(tag.slug, created);
+  }
+
+  for (const note of PART2_NOTES) {
+    const existing = await strapi.documents('api::note.note').findFirst({
+      filters: { title: { $eq: note.title } },
+    });
+    if (existing) continue;
+
+    const tagIds = note.tagSlugs
+      .map((s) => tagsBySlug.get(s)?.documentId)
+      .filter(Boolean);
+
+    await strapi.documents('api::note.note').create({
+      data: {
+        title: note.title,
+        content: note.content,
+        pinned: note.pinned,
+        archived: note.archived,
+        internalNotes: note.internalNotes,
+        tags: tagIds,
+      },
+    });
+  }
+}
+
+async function main() {
+  const { createStrapi, compileStrapi } = require('@strapi/strapi');
+
+  const appContext = await compileStrapi();
+  const app = await createStrapi(appContext).load();
+
+  app.log.level = 'error';
+
+  await seedExampleApp();
+  await app.destroy();
+
+  process.exit(0);
+}
+
+main().catch((error) => {
+  console.error(error);
   process.exit(1);
 });

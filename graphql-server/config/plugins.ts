@@ -1,15 +1,18 @@
-import type { Core } from '@strapi/strapi';
+import type { Core } from "@strapi/strapi";
 
-const config = ({ env }: Core.Config.Shared.ConfigParams): Core.Config.Plugin => ({
+const config = ({
+  env,
+}: Core.Config.Shared.ConfigParams): Core.Config.Plugin => ({
   graphql: {
     config: {
-      endpoint: '/graphql',
+      endpoint: "/graphql",
       shadowCRUD: true,
       depthLimit: 10,
-      amountLimit: 100,
-      landingPage: env('NODE_ENV') !== 'production',
+      defaultLimit: 25,
+      maxLimit: 100,
+      landingPage: env("NODE_ENV") !== "production",
       apolloServer: {
-        introspection: env('NODE_ENV') !== 'production',
+        introspection: env("NODE_ENV") !== "production",
       },
     },
   },

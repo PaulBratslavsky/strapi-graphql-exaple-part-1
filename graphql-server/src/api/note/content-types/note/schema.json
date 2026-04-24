@@ -4,8 +4,7 @@
   "info": {
     "singularName": "note",
     "pluralName": "notes",
-    "displayName": "Note",
-    "description": "A user-authored note."
+    "displayName": "Note"
   },
   "options": {
     "draftAndPublish": false
@@ -14,11 +13,10 @@
   "attributes": {
     "title": {
       "type": "string",
-      "required": true,
-      "maxLength": 200
+      "required": true
     },
     "content": {
-      "type": "blocks"
+      "type": "richtext"
     },
     "pinned": {
       "type": "boolean",
@@ -30,7 +28,7 @@
     },
     "internalNotes": {
       "type": "text",
-      "private": false
+      "private": true
     },
     "tags": {
       "type": "relation",

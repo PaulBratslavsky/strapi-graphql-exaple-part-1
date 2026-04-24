@@ -1,70 +1,72 @@
-type TextChild = { type?: string; text?: string; children?: TextChild[] };
-type Block = { type?: string; children?: TextChild[] };
-
-function blocksToText(blocks: Block[] | null | undefined): string {
-  if (!Array.isArray(blocks)) return '';
-  const walk = (nodes: TextChild[] | undefined): string =>
-    Array.isArray(nodes)
-      ? nodes
-          .map((n) =>
-            typeof n?.text === 'string' ? n.text : walk(n?.children),
-          )
-          .join('')
-      : '';
-  return blocks
-    .map((block) => walk(block?.children))
-    .filter(Boolean)
-    .join('\n');
+function stripMarkdown(md: string): string {
+  return (md ?? "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`[^`]*`/g, " ")
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/^#+\s+|^>\s+|^[-*+]\s+|^\d+\.\s+/gm, "")
+    .replace(/\*\*([^*]*)\*\*|__([^_]*)__/g, (_, a, b) => a ?? b)
+    .replace(/\*([^*]*)\*|_([^_]*)_/g, (_, a, b) => a ?? b)
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function countWords(text: string): number {
-  const trimmed = text.trim();
-  if (!trimmed) return 0;
-  return trimmed.split(/\s+/).length;
-}
+const countWords = (text: string) => {
+  const t = text.trim();
+  return t ? t.split(/\s+/).length : 0;
+};
 
 export default function computedFields({
   nexus,
 }: {
-  nexus: typeof import('nexus');
+  nexus: typeof import("nexus");
 }) {
   return {
     types: [
       nexus.extendType({
-        type: 'Note',
+        type: "Article",
         definition(t) {
-          t.nonNull.int('wordCount', {
-            resolve(parent: { content?: Block[] | null }) {
-              return countWords(blocksToText(parent?.content));
+          t.nonNull.int("wordCount", {
+            description: "Word count of the article description.",
+            resolve(parent: { description?: string | null }) {
+              const text = (parent?.description ?? "").trim();
+              return text ? text.split(/\s+/).length : 0;
             },
           });
-          t.nonNull.int('readingTime', {
-            description: 'Estimated reading time in minutes (200 wpm).',
-            resolve(parent: { content?: Block[] | null }) {
-              const words = countWords(blocksToText(parent?.content));
-              return Math.max(1, Math.ceil(words / 200));
-            },
+        },
+      }),
+      nexus.extendType({
+        type: "Note",
+        definition(t) {
+          t.nonNull.int("wordCount", {
+            resolve: (parent: any) =>
+              countWords(stripMarkdown(parent?.content)),
           });
-          t.nonNull.string('excerpt', {
+          t.nonNull.int("readingTime", {
+            description: "Estimated reading time in minutes (200 wpm).",
+            resolve: (parent: any) =>
+              Math.max(
+                1,
+                Math.ceil(countWords(stripMarkdown(parent?.content)) / 200),
+              ),
+          });
+          t.nonNull.string("excerpt", {
             args: { length: nexus.intArg({ default: 180 }) },
-            resolve(
-              parent: { content?: Block[] | null },
-              args: { length: number },
-            ) {
-              const text = blocksToText(parent?.content)
-                .replace(/\s+/g, ' ')
-                .trim();
-              if (text.length <= args.length) return text;
-              return text.slice(0, args.length).trimEnd() + '…';
+            resolve: (parent: any, args: { length: number }) => {
+              const text = stripMarkdown(parent?.content);
+              return text.length <= args.length
+                ? text
+                : text.slice(0, args.length).trimEnd() + "...";
             },
           });
         },
       }),
     ],
     resolversConfig: {
-      'Note.wordCount': { auth: false },
-      'Note.readingTime': { auth: false },
-      'Note.excerpt': { auth: false },
+      "Article.wordCount": { auth: false },
+      "Note.wordCount": { auth: false },
+      "Note.readingTime": { auth: false },
+      "Note.excerpt": { auth: false },
     },
   };
 }

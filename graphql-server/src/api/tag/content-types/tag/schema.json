@@ -4,8 +4,7 @@
   "info": {
     "singularName": "tag",
     "pluralName": "tags",
-    "displayName": "Tag",
-    "description": "A label for grouping notes."
+    "displayName": "Tag"
   },
   "options": {
     "draftAndPublish": false
@@ -14,19 +13,23 @@
   "attributes": {
     "name": {
       "type": "string",
-      "required": true,
-      "unique": true,
-      "maxLength": 60
+      "required": true
     },
     "slug": {
       "type": "uid",
-      "targetField": "name",
-      "required": true
+      "targetField": "name"
     },
     "color": {
-      "type": "string",
-      "regex": "^#([0-9a-fA-F]{6})$",
-      "default": "#6366f1"
+      "type": "enumeration",
+      "default": "gray",
+      "enum": [
+        "red",
+        "blue",
+        "green",
+        "yellow",
+        "purple",
+        "gray"
+      ]
     },
     "notes": {
       "type": "relation",

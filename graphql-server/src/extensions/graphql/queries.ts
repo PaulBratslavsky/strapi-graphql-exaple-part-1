@@ -1,112 +1,119 @@
-import type { Core } from '@strapi/strapi';
+import type { Core } from "@strapi/strapi";
 
 export default function queries({
   nexus,
   strapi,
 }: {
-  nexus: typeof import('nexus');
+  nexus: typeof import("nexus");
   strapi: Core.Strapi;
 }) {
   return {
-  types: [
-    nexus.objectType({
-      name: 'TagCount',
-      definition(t) {
-        t.nonNull.string('slug');
-        t.nonNull.string('name');
-        t.nonNull.int('count');
-      },
-    }),
+    types: [
+      nexus.objectType({
+        name: "TagCount",
+        definition(t) {
+          t.string("slug");
+          t.nonNull.string("name");
+          t.nonNull.int("count");
+        },
+      }),
+      nexus.objectType({
+        name: "NoteStats",
+        definition(t) {
+          t.nonNull.int("total");
+          t.nonNull.int("pinned");
+          t.nonNull.int("archived");
+          t.nonNull.list.nonNull.field("byTag", { type: "TagCount" });
+        },
+      }),
+      nexus.extendType({
+        type: "Query",
+        definition(t) {
+          t.list.field("searchArticles", {
+            type: nexus.nonNull("Article"),
+            args: { q: nexus.nonNull(nexus.stringArg()) },
+            async resolve(_parent: unknown, args: { q: string }) {
+              return strapi.documents("api::article.article").findMany({
+                filters: { title: { $containsi: args.q } },
+                sort: ["publishedAt:desc"],
+                status: "published",
+              });
+            },
+          });
 
-    nexus.objectType({
-      name: 'NoteStats',
-      definition(t) {
-        t.nonNull.int('total');
-        t.nonNull.int('pinned');
-        t.nonNull.int('archived');
-        t.nonNull.list.nonNull.field('byTag', { type: 'TagCount' });
-      },
-    }),
+          t.list.field("searchNotes", {
+            type: nexus.nonNull("Note"),
+            args: {
+              query: nexus.nonNull(nexus.stringArg()),
+              includeArchived: nexus.booleanArg({ default: false }),
+            },
+            async resolve(
+              _parent: unknown,
+              {
+                query,
+                includeArchived,
+              }: { query: string; includeArchived: boolean },
+            ) {
+              const where: any = { title: { $containsi: query } };
+              if (!includeArchived) where.archived = false;
+              return strapi.documents("api::note.note").findMany({
+                filters: where,
+                populate: ["tags"],
+                sort: ["pinned:desc", "updatedAt:desc"],
+              });
+            },
+          });
 
-    nexus.extendType({
-      type: 'Query',
-      definition(t) {
-        t.list.field('searchNotes', {
-          type: nexus.nonNull('Note'),
-          args: {
-            query: nexus.nonNull(nexus.stringArg()),
-            includeArchived: nexus.booleanArg({ default: false }),
-          },
-          async resolve(_parent, args) {
-            const { query, includeArchived } = args as {
-              query: string;
-              includeArchived: boolean;
-            };
-            const where: any = {
-              title: { $containsi: query },
-            };
-            if (!includeArchived) where.archived = false;
-            return strapi.documents('api::note.note').findMany({
-              filters: where,
-              populate: ['tags'],
-              sort: ['pinned:desc', 'updatedAt:desc'],
-            });
-          },
-        });
+          t.nonNull.field("noteStats", {
+            type: "NoteStats",
+            async resolve() {
+              const [total, pinned, archived, tags] = await Promise.all([
+                strapi.documents("api::note.note").count({}),
+                strapi.documents("api::note.note").count({
+                  filters: { pinned: true },
+                }),
+                strapi.documents("api::note.note").count({
+                  filters: { archived: true },
+                }),
+                strapi.documents("api::tag.tag").findMany({
+                  populate: ["notes"],
+                  sort: ["name:asc"],
+                }),
+              ]);
 
-        t.nonNull.field('noteStats', {
-          type: 'NoteStats',
-          async resolve() {
-            const [total, pinned, archived] = await Promise.all([
-              strapi.db.query('api::note.note').count(),
-              strapi.db.query('api::note.note').count({ where: { pinned: true } }),
-              strapi.db.query('api::note.note').count({ where: { archived: true } }),
-            ]);
+              const byTag = tags
+                .map((tag: any) => ({
+                  slug: tag.slug,
+                  name: tag.name,
+                  count: Array.isArray(tag.notes) ? tag.notes.length : 0,
+                }))
+                .sort(
+                  (a, b) => b.count - a.count || a.name.localeCompare(b.name),
+                );
 
-            const rows = (await strapi.db.connection.raw(
-              `
-                SELECT tags.slug as slug, tags.name as name, COUNT(link.note_id) as count
-                FROM tags
-                LEFT JOIN notes_tags_lnk link ON link.tag_id = tags.id
-                GROUP BY tags.id
-                ORDER BY count DESC, tags.name ASC
-              `,
-            )) as Array<{ slug: string; name: string; count: number }>;
+              return { total, pinned, archived, byTag };
+            },
+          });
 
-            const byTag = (Array.isArray(rows) ? rows : []).map((r) => ({
-              slug: r.slug,
-              name: r.name,
-              count: Number(r.count ?? 0),
-            }));
-
-            return { total, pinned, archived, byTag };
-          },
-        });
-
-        t.list.field('notesByTag', {
-          type: nexus.nonNull('Note'),
-          args: {
-            slug: nexus.nonNull(nexus.stringArg()),
-          },
-          async resolve(_parent, args) {
-            const { slug } = args as { slug: string };
-            return strapi.documents('api::note.note').findMany({
-              filters: {
-                archived: false,
-                tags: { slug: { $eq: slug } },
-              },
-              populate: ['tags'],
-              sort: ['pinned:desc', 'updatedAt:desc'],
-            });
-          },
-        });
-      },
-    }),
-  ],
-  resolversConfig: {
-    'Query.searchNotes': { auth: false },
-    'Query.noteStats': { auth: false },
-    'Query.notesByTag': { auth: false },
-  },
+          t.list.field("notesByTag", {
+            type: nexus.nonNull("Note"),
+            args: { slug: nexus.nonNull(nexus.stringArg()) },
+            async resolve(_parent: unknown, { slug }: { slug: string }) {
+              return strapi.documents("api::note.note").findMany({
+                filters: { archived: false, tags: { slug: { $eq: slug } } },
+                populate: ["tags"],
+                sort: ["pinned:desc", "updatedAt:desc"],
+              });
+            },
+          });
+        },
+      }),
+    ],
+    resolversConfig: {
+      "Query.searchArticles": { auth: false },
+      "Query.searchNotes": { auth: false },
+      "Query.noteStats": { auth: false },
+      "Query.notesByTag": { auth: false }, // NEW
+    },
   };
 }

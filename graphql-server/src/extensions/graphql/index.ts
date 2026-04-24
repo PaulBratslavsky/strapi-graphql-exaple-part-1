@@ -1,14 +1,11 @@
-import type { Core } from '@strapi/strapi';
-import middlewaresAndPolicies from './middlewares-and-policies';
-import computedFields from './computed-fields';
-import queries from './queries';
-import mutations from './mutations';
-import configureShadowCRUD from './shadow-crud';
+import type { Core } from "@strapi/strapi";
+import computedFields from "./computed-fields";
+import queries from "./queries";
+import mutations from "./mutations";
+import middlewaresAndPolicies from "./middlewares-and-policies";
 
 export default function registerGraphQLExtensions(strapi: Core.Strapi) {
-  const extensionService = strapi.plugin('graphql').service('extension');
-
-  configureShadowCRUD(strapi);
+  const extensionService = strapi.plugin("graphql").service("extension");
 
   extensionService.use(middlewaresAndPolicies);
   extensionService.use(computedFields);
