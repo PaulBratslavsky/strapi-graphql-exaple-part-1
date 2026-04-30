@@ -33,12 +33,12 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3001`. You will see the home page rendering placeholder
+Open `http://localhost:3000`. You will see the home page rendering placeholder
 notes. Open part-3.md and work through the steps.
 
 ## Prerequisites
 
-- The Part 2 Strapi backend running at `http://localhost:1338/graphql`
+- The Part 2 Strapi backend running at `http://localhost:1337/graphql`
   (see `graphql-server/` in the sibling directory).
 - Node.js 20.9+.
 
@@ -70,3 +70,4 @@ that already exist in the starter as stubs:
 Part 4 also adds new files (`app/login/*`, `app/register/*`, `middleware.ts`,
 `components/auth-nav.tsx`) and a couple of new `gql` operations
 (`LOGIN`, `REGISTER`, `ME`). None of that needs to exist during Part 3.
+# strapi-nextjs-grapql-starter-for-post

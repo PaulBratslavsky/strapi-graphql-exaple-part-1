@@ -3,10 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "next dev",
     "build": "next build",
-    "start": "next start -p 3001",
-    "lint": "eslint"
+    "start": "next start",
+    "lint": "eslint",
+    "seed": "node scripts/seed.mjs",
+    "test:backend": "node scripts/test-graphql.mjs"
   },
   "dependencies": {
     "@apollo/client": "^4.1.7",
