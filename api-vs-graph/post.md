@@ -7,15 +7,15 @@ We'll go through what differs between REST and GraphQL in 2026, then look at Str
 **TL;DR**
 
 - Field selection is not unique to GraphQL. JSON:API, OData, GitHub's REST API, and Strapi v5 all support sparse fieldsets, populate-style includes, and rich filtering through query parameters. Modern REST returns the same precise data shape a GraphQL selection would.
-- The two APIs differ in caching, error semantics, the N+1 problem, query-cost attacks, per-field authorization, file uploads, and operational tooling. Several of these favor REST. Federation and a typed, introspectable schema favor GraphQL, with use cases that have specific preconditions.
+- The two APIs differ in caching, error semantics, the N+1 problem, query-cost attacks, per-field authorization, file uploads, and operational tooling. Most of these favor REST. Federation and a typed, introspectable schema favor GraphQL when you have many backend teams or many client surfaces.
 - Most projects do well on REST. GraphQL pays off when several clients pull different slices of the same graph, when custom queries need to aggregate across types, or when a frontend is already built around Apollo or Relay.
-- In Strapi v5, the REST API is on by default and complete. GraphQL is a plugin. REST handles file uploads; GraphQL does not. With OpenAPI plus `openapi-fetch`, REST also gets end-to-end TypeScript types without an Apollo runtime.
+- In Strapi v5, the REST API is on by default. GraphQL is a separate plugin. REST handles file uploads; GraphQL does not. With OpenAPI plus `openapi-fetch`, REST also gets end-to-end TypeScript types without an Apollo runtime.
 
 ## 1. Field selection is not a GraphQL-only feature
 
 The over-fetching argument goes like this: a REST endpoint returns a fixed payload. If the page only needs the article title and slug, but the endpoint returns the full body, the byline, the cover image, and twelve other fields, the client paid for data it did not use. GraphQL solves this by letting the client name the fields it wants.
 
-The same control exists in REST, and has for years.
+The same control exists in REST.
 
 - JSON:API, a published specification, has supported sparse fieldsets since 2015. A request of `?fields[articles]=title,slug` returns title and slug.
 - OData has supported `$select`, `$expand`, and `$filter` since 2007.
@@ -64,7 +64,7 @@ const articles = await client.collection("articles").find({
 
 So the bracket form is what the server sees, but it is not what the developer types.
 
-Whether GraphQL's other properties (a typed schema, a single endpoint, introspection, federation, subscriptions) justify the costs that come with them is the question the next sections work through.
+Field selection alone is not the reason to pick GraphQL. The next sections look at what else the two APIs differ on.
 
 ## 2. What actually differs
 
@@ -78,7 +78,7 @@ curl https://api.example.com/articles/42?fields[0]=title&fields[1]=slug
 
 That is the whole client.
 
-GraphQL is more parts. On the server you need a library: Apollo Server, GraphQL Yoga, Mercurius, gqlgen, or the framework's plugin (Strapi's GraphQL plugin uses Apollo Server under the hood). You define a schema, write resolvers, and wire the two together. On the client you usually want Apollo Client, urql, or Relay. A raw `fetch` works, but the moment you want a normalized cache, optimistic updates, or any of the things people install Apollo for, you are back to a real client library. To get TypeScript types from your queries you also need GraphQL Code Generator and a build step that runs it.
+GraphQL is more parts. On the server you need a library: Apollo Server, GraphQL Yoga, Mercurius, gqlgen, or the framework's plugin (Strapi's GraphQL plugin uses Apollo Server under the hood). You define a schema, write resolvers, and wire the two together. On the client you usually want Apollo Client, urql, or Relay. A raw `fetch` works, but the moment you want a shared cache for the same `User` object across many components, optimistic updates on a mutation, or query deduplication, you are back to a real client library. To get TypeScript types from your queries you also need GraphQL Code Generator and a build step that runs it.
 
 None of this is hard. It is just more.
 
@@ -105,7 +105,7 @@ This is solvable. It is extra work that has to be added on top of any GraphQL de
 
 ### 2.3 Caching
 
-This is the place REST wins by a wide margin, and it is not close.
+REST wins on caching by a wide margin.
 
 A REST `GET` is cacheable by default. The URL is the cache key. CDNs, browsers, and reverse proxies have been doing this since 1997. With one header, `Cache-Control: public, max-age=60, stale-while-revalidate=300`, the response sits at the edge for sixty seconds. With `ETag` plus `If-None-Match`, the server replies `304 Not Modified` with no body. With `Vary: Authorization` you can cache differently per signed-in user. None of this requires a server change. None of it requires a client change.
 
@@ -118,9 +118,9 @@ APQ works. It is also not free:
 - You need a shared cache backend like Redis for the persisted-query store. An in-memory map loses entries on every deploy.
 - The first request for any query is still a `POST` round trip to register the hash, then a retry.
 - Variables still go in the URL, so a query with many variables can hit URL length limits.
-- APQ only handles transport-level caching. It does not give you `Cache-Control` per resource because there is no resource, only a query.
+- APQ caches the whole query response by hash. It does not give you per-row invalidation. If one article changes, you have to clear every cached query that touched that article, because the cache key is the query, not the row.
 
-The other option is client-side normalized caching (Apollo InMemoryCache, Relay store). This is a real win for single-page apps where the same `User` object appears in many components and you want them to stay in sync. It is also a meaningful runtime in your bundle, with its own edge cases (cache redirects, partial query results, list pagination merge functions). And none of it helps your CDN.
+The other option is client-side caching (Apollo InMemoryCache, Relay store). This is a real win for single-page apps where the same `User` object appears in many components and you want them to stay in sync. It also ships a meaningful chunk of code to the browser, and you write per-query configuration to handle pagination merging, partial cache hits, and telling the cache that two queries returned the same `User` (for example, `getUser(id: 1)` and `currentUser` are the same record). And none of it helps your CDN.
 
 For a read-heavy public API (a blog, a marketing site, a product catalog), REST plus a CDN is hard to beat. For a logged-in dashboard where every response is per-user, edge caching does not apply and the gap closes.
 
@@ -128,9 +128,9 @@ For a read-heavy public API (a blog, a marketing site, a product catalog), REST 
 
 #### Resolvers vs handlers
 
-A REST handler is a function from request to response. You can read it top to bottom. You can write the SQL by hand, add a Redis cache, instrument timing. Each endpoint is shaped on its own.
+A REST handler is a function from request to response. You can read it top to bottom. You can write the SQL by hand, add a Redis cache, log timing on the slow part. Each endpoint is its own thing, optimized for its own access pattern.
 
-A GraphQL execution is a tree of resolver calls. Each field has its own resolver. The article resolver does not know whether the caller asked for the author. The author resolver does not know whether the caller asked for the author's email. This pushes you toward generic resolvers that fetch the field they own without looking at the rest of the query, and that is where the famous problem comes from.
+A GraphQL execution is a tree of resolver calls. Each field has its own resolver. The article resolver does not know whether the caller asked for the author. The author resolver does not know whether the caller asked for the author's email. So each resolver has to fetch its own field on its own, without seeing the rest of the query. That is where the N+1 problem in the next section comes from.
 
 #### The N+1 problem
 
@@ -153,7 +153,7 @@ A query of `{ posts { title author { name } } }` triggers 21 SQL queries: one fo
 The standard fix is DataLoader. You wrap each data source in a loader, and within one tick the loader collects keys and runs a single batched query. It works, but:
 
 - You have to use it for every relation. Forget one and N+1 quietly comes back.
-- DataLoader instances are per-request (otherwise users see each other's data). Setup belongs in the request context.
+- You create a fresh DataLoader on every request, not one shared across the server. A loader caches what it has seen; a shared one would leak one user's data to the next user.
 - Many real queries cannot be expressed as `WHERE id IN (...)`. Filtered subqueries, paginated child collections, conditional joins. DataLoader does not help there.
 - Federation makes it worse. A four-subgraph query can fan out to sixteen backend calls.
 
@@ -179,7 +179,7 @@ query Bomb {
 }
 ```
 
-If `users` returns a thousand rows and each `friends` has a hundred entries, you have ten billion fields to resolve. This shape of attack is well-known in the GraphQL community and is what every production GraphQL deployment has to defend against. To defend, you bolt on:
+If `users` returns a thousand rows and each `friends` has a hundred entries, you have ten billion fields to resolve. Every production GraphQL deployment has to defend against this. To defend, you bolt on:
 
 - Depth limiting (typically 5 to 10 levels).
 - Cost analysis: assign each field a cost and reject queries that exceed a threshold.
@@ -187,13 +187,13 @@ If `users` returns a thousand rows and each `friends` has a hundred entries, you
 - Introspection disabling in production, otherwise attackers fetch your full schema.
 - Persisted queries or trusted documents to reject any query not on a server-side allowlist (at which point you have given up most of GraphQL's flexibility for clients you do not control).
 
-REST has none of these vulnerability classes because each endpoint shape is fixed at design time.
+REST has none of these because every endpoint is fixed at design time. The server decided in advance what `/articles` returns; the client cannot compose a new query on the fly.
 
 #### Authorization
 
 REST authorization is per-route. The route `GET /admin/users` has one permission check; the handler enforces it once. The rule sits in middleware on a route, and the rule lives in one file the new hire can find.
 
-GraphQL authorization is per-field. A query like `{ user(id: 1) { email internalNotes adminFlag } }` has one top-level resolver, but every field can leak data on its own. The flexible-query pattern means object and function-level authorization checks that work fine in REST do not necessarily cover every path in a GraphQL schema.
+GraphQL authorization is per-field. A query like `{ user(id: 1) { email internalNotes adminFlag } }` has one top-level resolver, but every field can leak data on its own. A single "is the caller allowed to view this user?" check at the route handler covers every field in REST. In GraphQL, that check has to repeat for every field a query selects, because each field is its own data path.
 
 You end up with one of:
 
@@ -201,13 +201,13 @@ You end up with one of:
 - Schema directives like `@auth(requires: ADMIN)` on fields. Better, but the runtime has to enforce them.
 - A central rules library like `graphql-shield`, layered over the resolver tree.
 
-Strapi v5's GraphQL plugin handles this with `resolversConfig`. The plugin lets you attach middlewares and policies to specific resolvers in the schema, including nested ones, so you can run a permission check for every field that needs one. The flip side is that you now have to think about authorization at every node of the tree, not once per route.
+Strapi v5's GraphQL plugin handles this with `resolversConfig`. The plugin lets you attach middlewares and policies to specific resolvers in the schema, including nested ones, so you can run a permission check for every field that needs one. The flip side is that you now have to think about authorization on every field that touches a sensitive value, not once per route.
 
 #### Observability
 
-A REST endpoint gives you natural span boundaries. `GET /articles` is one operation, one trace, one latency metric. APM dashboards work out of the box. Datadog, New Relic, OpenTelemetry instrumentation for Express, Koa, and Fastify all ship with sensible defaults.
+A REST request like `GET /articles` shows up in your logs and your tracing tool as one operation: one URL, one latency number, one error count. Datadog, New Relic, and OpenTelemetry libraries for Express, Koa, and Fastify all do this out of the box.
 
-GraphQL traces need per-resolver instrumentation. You either get one giant span called `POST /graphql` (useless) or a flame graph of nested resolver spans (useful but more setup). Tracking which endpoint is slow becomes tracking which field of which operation is slow, and the same field might be slow only when called as a child of one parent. It is solvable. It is more work.
+GraphQL needs per-resolver tracing setup. Without it, every request is one span called `POST /graphql`, which tells you nothing about what was slow. With it, you get a tree of nested resolver spans, which is useful but extra work. Tracking which endpoint is slow becomes tracking which field of which operation is slow, and the same field can be fast in one query and slow in another depending on where it sits in the tree.
 
 ### 2.5 Federation, BFFs, and distributed backends
 
@@ -223,7 +223,7 @@ The downside is that you write and maintain N BFFs.
 
 #### GraphQL as the BFF
 
-The natural evolution: instead of writing N BFFs, run one GraphQL server and let each client write its own queries. This is a real win when client data needs are similar in shape but different in detail, and one team owns both the data graph and the schema.
+Instead of writing N BFFs, you can run one GraphQL server and let each client write its own queries. This is a real win when client data needs are similar in shape but different in detail, and one team owns both the data graph and the schema.
 
 #### Apollo Federation
 
@@ -242,9 +242,7 @@ Shopify is the other heavyweight. They have moved their Admin platform onto Grap
 
 #### Where federation is overkill
 
-If you have one backend team, one database, one or two clients, and no need for independent service ownership, federation is a complexity tax with no payback. You are paying for distributed-system complexity (supergraph composition, subgraph health, query planning, cross-service tracing) when a Postgres database and a single REST app would do the job.
-
-Federation has costs (supergraph composition, subgraph health monitoring, query planning, cross-service tracing) that only pay off above a certain organization size. Below that, the same operational concerns are simpler to handle on a single REST app.
+If you have one backend team, one database, one or two clients, and no need for independent service ownership, federation is a complexity tax with no payback. You are paying for distributed-system overhead (supergraph composition, subgraph health monitoring, query planning, cross-service tracing) when a Postgres database and a single REST app would do the job.
 
 #### REST-first public infrastructure APIs
 
@@ -261,7 +259,7 @@ In 2026 the OpenAPI ecosystem is genuinely good. The two libraries that matter f
 - [`openapi-typescript`](https://openapi-ts.dev/) is a CLI that reads an OpenAPI 3.0 or 3.1 spec (a JSON or YAML document describing every endpoint, every parameter, every response shape) and emits a single TypeScript file containing a `paths` type. That `paths` type is a giant object literal: keys are URL templates (`/articles/{id}`), values describe the methods, params, and response shapes for each one.
 - [`openapi-fetch`](https://openapi-ts.dev/openapi-fetch/) is a tiny (around 6 KB) wrapper around the platform `fetch`. It takes that `paths` type as a generic and gives you a typed client. The published package is `openapi-fetch` on npm, currently on v7, and works with Node 18 or higher and TypeScript 4.7 or higher.
 
-How it works in practice:
+How it works:
 
 ```ts
 import createClient from "openapi-fetch";
@@ -291,7 +289,7 @@ The end result is the same "compile error if the API changes" guarantee that Gra
 
 The mature path on the GraphQL side. Point `graphql-codegen` at the schema (introspection or SDL file). Configure plugins: `typescript`, `typescript-operations`, `typed-document-node`, plus framework adapters if you want hooks. Each `.graphql` file or inline `gql\`...\`` template produces typed query and mutation hooks. Newer libraries like `gql.tada` skip codegen entirely and infer types from a schema source-of-truth at compile time.
 
-This works well. You also maintain a codegen pipeline as part of your build, and the generated artifacts can grow large in big projects.
+This works well. You also run a code-generation step as part of your build, and the generated TypeScript files can get large in big projects.
 
 #### tRPC
 
@@ -304,7 +302,7 @@ For type safety alone, REST plus OpenAPI is at parity with or better than GraphQ
 GraphQL still has a typing edge in two narrow cases:
 
 - Fragment colocation. A React component declares the exact fields it needs, and those fields are merged into the parent query automatically. Relay has built its whole reputation on this.
-- Truly variable query shapes, where the client genuinely composes different queries at runtime.
+- Queries that change per call. A search UI where the user picks which fields to return, or a power-user query builder. With REST you would have to expose a server-side query language; with GraphQL the schema is the query language.
 
 Outside those two cases, REST plus OpenAPI is at parity or better.
 
@@ -314,9 +312,7 @@ Outside those two cases, REST plus OpenAPI is at parity or better.
 
 REST handles uploads with a plain `multipart/form-data` POST to `/upload`. Every framework supports it natively.
 
-GraphQL has no spec-level upload type. The community pattern is the [GraphQL multipart request specification](https://github.com/jaydenseric/graphql-multipart-request-spec), which encodes files as `multipart/form-data` with a JSON `operations` field and a `map` field. Apollo Server removed its built-in upload integration in 2021 over CSRF concerns. The currently recommended pattern (Apollo's, GraphQL.org's, and the same one most REST APIs use) is to issue a presigned upload URL through a mutation and have the client `PUT` the file directly to the storage provider.
-
-The recommended pattern is the same one most REST APIs use anyway: get a signed S3 URL via a mutation and have the client upload directly to S3.
+GraphQL has no spec-level upload type. The community pattern is the [GraphQL multipart request specification](https://github.com/jaydenseric/graphql-multipart-request-spec), which encodes files as `multipart/form-data` with a JSON `operations` field and a `map` field. Apollo Server removed its built-in upload integration in 2021 over CSRF concerns. The currently recommended pattern is the same one most REST APIs already use: a mutation hands the client a presigned upload URL, the client `PUT`s the file directly to the storage provider.
 
 Strapi's GraphQL plugin does not handle media uploads at all. Files go through the REST `POST /upload` endpoint regardless of which API you use for the rest of the app. Even a Strapi project that uses GraphQL for everything else writes REST calls for uploads.
 
@@ -339,40 +335,7 @@ A fair summary at the protocol level:
 
 At the protocol level, the differences are small and dominated by your database access patterns and your caching strategy. Choose for fit, not for benchmarks.
 
-#### Measured: Strapi v5 REST vs GraphQL on Postgres
-
-We ran a small load test against the `examples/complex` app from the `strapi/strapi` monorepo to put numbers on the resolver-overhead claim. The full methodology, raw Artillery output, and reproduction commands are in [`perf-results.md`](./perf-results.md). Headline setup:
-
-- Strapi v5.44.0, Postgres 16 in Docker, single workstation.
-- Public role granted `find` and `findOne` on the test content types.
-- Artillery, 10s warmup at 10 req/s plus 60s sustained at 50 req/s constant arrival rate (~3,100 requests per scenario).
-- Each scenario ran in isolation: every test starts with a fresh Postgres container, the seeded snapshot restored, and a freshly booted Strapi process. REST and GraphQL never run together.
-- Single run per scenario. Treat as a directional comparison, not a final benchmark.
-
-Three scenarios, each asking for the same data on both APIs:
-
-- **A.** List 25 entries from `basic` (scalars only, no relations).
-- **B.** List 25 entries from `relation` with one one-to-one relation, one many-to-many, and one component populated.
-- **C.** List 10 entries from `relation` with all relations populated, two single components, two repeatable components, and two dynamic zones.
-
-| Scenario | API | Achieved rate (req/s) | Median (ms) | p95 (ms) | p99 (ms) | Max (ms) |
-| --- | --- | --- | --- | --- | --- | --- |
-| A | REST | 50 | 7.9 | 12.1 | 15.0 | 28 |
-| A | GraphQL | 50 | 6.0 | 8.9 | 10.9 | 31 |
-| B | REST | 50 | 13.1 | 16.9 | 19.9 | 35 |
-| B | GraphQL | 50 | 32.8 | 58.6 | 68.7 | 97 |
-| C | REST | 49 | 22.0 | 26.8 | 32.1 | 45 |
-| C | GraphQL | 40 | 58.6 | 273.2 | 295.9 | 312 |
-
-What the numbers say:
-
-- **Simple list (A).** Both APIs are fast. GraphQL is slightly faster on this shape (6.0 vs 7.9 ms median), within noise but consistent. The REST envelope (`meta.pagination`, auto-included `id`/`documentId`/timestamps) plus the `qs` parser is a small overhead.
-- **Populated list (B).** REST is roughly 2.5× faster on median and 3.5× faster on p95. Same logical request, same database rows. The cost is in Strapi's GraphQL resolvers: each relation has its own resolver, and the per-field overhead adds up.
-- **Deep populate with dynamic zones (C).** REST holds steady at 22 ms median and 26.8 ms p95, with 0 errors and no rate degradation. GraphQL is 2.7× slower on median, 10× slower on p95, and the server could not keep pace with 50 req/s sustained: the achieved rate dropped to 40 req/s. This is the resolver-fan-out shape of the work showing up at the tail.
-
-The pattern: the more nested fields a request asks for, the more REST's explicit `populate` (which lets Strapi build one or a small number of SQL queries with the right joins) wins over GraphQL's resolver tree (where each relation and component has its own DB call by default). On a shallow query the two are at parity. On a deep one REST is several times faster and the gap grows in the tail.
-
-This test does not measure REST's CDN-cache case (a `Cache-Control: public, s-maxage=60` GET that the edge serves without touching origin), nor GraphQL's APQ workaround. Those would change the numbers further in REST's favor and partly close the gap on GraphQL respectively.
+For measured numbers against a real Strapi v5 app, see section 3.5 below.
 
 ### 2.9 Public APIs
 
@@ -388,7 +351,7 @@ The set of major public GraphQL APIs is small. GitHub offers GraphQL alongside R
 
 That is not because they are behind the times. It is because REST's properties are exactly what public-API consumers want.
 
-## 3. Strapi v5 in practice
+## 3. REST and GraphQL in Strapi v5
 
 Strapi v5 ships both APIs out of the box. REST is on by default. GraphQL is `@strapi/plugin-graphql`, installed and configured separately. Both are auto-generated from your content types.
 
@@ -454,7 +417,7 @@ Two more one-time setup steps before the API tests below will return data:
 
 1. **Publish the seeded articles.** The example data ships with `draftAndPublish` enabled on Article, so every seeded article starts as a draft. Strapi's APIs only return published entries to public callers. In the admin, click `Content Manager → Article`, tick the header checkbox to select every row, click `Publish` in the bulk-action bar, then confirm in the modal. Author and Category do not have draft mode and are queryable as soon as you grant permissions.
 ![002-publish-articles.png](img/002-publish-articles.png)
-2. **Grant public read permissions.** ( should already be granted ) Open `Settings → Users & Permissions Plugin → Roles → Public`. Expand `Article`, check `find` and `findOne`. Repeat for `Author` and `Category`. Save.
+2. **Grant public read permissions.** The Public role usually has these on a fresh install, but check anyway. Open `Settings → Users & Permissions Plugin → Roles → Public`. Expand `Article`, confirm `find` and `findOne` are enabled. Repeat for `Author` and `Category`. Save.
 ![003-give-access.png](img/003-give-access.png)
 
 You now have two interactive endpoints to test against:
@@ -757,7 +720,32 @@ Same data, two ways to ask for it. The REST `GET` is cacheable at the edge by UR
 - **Public role permissions apply per content type.** A nested GraphQL selection like `articles { author { name } }` reads both `Article` and `Author`. If the public role lacks `find` on `Author`, the relation comes back `null` while the `articles` query still succeeds.
 - **Authentication uses the same JWT.** REST takes it in the `Authorization` header through curl, Postman, or any HTTP client. The Apollo Sandbox UI has its own header field for it.
 
-### 3.5 Which is faster to ship in Strapi?
+### 3.5 Performance testing in Strapi
+
+**What we measured.** Four kinds of API call against the same Strapi v5 app on Postgres, hitting the same rows through both REST and GraphQL: a simple list with no relations, a list with relations and a component populated, a deep list with relations plus components plus dynamic zones, and a single create. We ran each one five times and report the median. Strapi and Postgres were fully restarted between every run.
+
+**Results.**
+
+| Scenario | API | p50 (ms) | p95 (ms) | p99 (ms) | rate (req/s) |
+| --- | --- | --- | --- | --- | --- |
+| Simple list (25 entries, no relations) | REST | 7 | 10.1 | 12.1 | 50 |
+| Simple list (25 entries, no relations) | GraphQL | 5 | 7 | 8.9 | 50 |
+| Populated list (relations + component) | REST | 12.1 | 13.9 | 16.9 | 50 |
+| Populated list (relations + component) | GraphQL | 27.9 | 47.9 | 58.6 | 50 |
+| Deep populate with dynamic zones | REST | 15 | 22 | 24.8 | 50 |
+| Deep populate with dynamic zones | GraphQL | 37.7 | 66 | 76 | 50 |
+| Create one entry | REST | 5 | 7.9 | 10.9 | 47 |
+| Create one entry | GraphQL | 5 | 8.9 | 10.1 | 50 |
+
+**What it means.**
+
+- **Simple reads and writes are basically tied.** On a simple list GraphQL was slightly faster (5 vs 7 ms median), because Strapi's REST response always carries extra fields like `id`, `documentId`, `createdAt`, `updatedAt`, `publishedAt`, plus a `meta.pagination` block on top of the data you asked for. On a single create both APIs were 5 ms median. They both go through the same Document Service, and most of that time is the database insert itself.
+- **The deeper the read, the more REST pulls ahead.** On the populated list (one one-to-one, one many-to-many, one component) REST was 2.3 times faster on the median (12.1 vs 27.9 ms). On the deep populate with dynamic zones, REST was 2.5 times faster on the median and 3 times faster at p95 (22 vs 66 ms). Strapi's GraphQL plugin runs each relation and each component through its own resolver, so the more relations and components you ask for, the more work the server does per request. REST builds one or a small number of SQL queries with the right joins instead.
+- **Under the same load, GraphQL is more likely to fall behind.** We sent 50 requests per second to both APIs. Every REST run handled that rate with no errors. Most GraphQL runs did too. Two of the twenty GraphQL runs did not: one deep-populate run only managed 22 requests per second instead of 50, and one populated-list run got so backed up that the p95 latency was 3.7 seconds and roughly a third of the requests did not come back before the test window ended. No REST run did anything like this. When GraphQL falls behind in Strapi, the slow tail goes from tens of milliseconds to seconds.
+
+**Bottom line for Strapi.** Simple reads and writes are a wash. Where REST is faster is the case Strapi is most often used for: pages that pull articles plus their author plus their category plus a couple of components. The more of those you ask for in one request, the wider the gap gets. We did not test REST behind a CDN or GraphQL with persisted queries (APQ); both would change the numbers in their respective API's favor.
+
+### 3.6 Which is faster to ship in Strapi?
 
 REST.
 
@@ -879,7 +867,7 @@ The cases where the answer is clearly yes:
 
 - **Component-level field selection (fragment colocation).** Each React, Vue, or Svelte component declares only the fields it needs, and Apollo Client or Relay merges them into the parent query for you. A Strapi REST request can do per-call field selection through `?fields=` and `?populate=`, but every screen has to assemble one combined URL by hand from every component's needs, which gets unwieldy as components nest.
 
-- **A frontend already built around Apollo Client or Relay.** Normalized client cache, optimistic updates, query-aware pagination. If your team has invested in these, the per-screen ergonomics are real and hard to give up.
+- **A frontend already built around Apollo Client or Relay.** Normalized client cache, optimistic updates, query-aware pagination. If your team has invested in these workflows, walking away from them costs more than it saves.
 
 - **Many backend teams converging on one client-facing API.** Apollo Federation (Netflix, Shopify scale). Overkill below that, but the strongest argument GraphQL has when the scale is there.
 
