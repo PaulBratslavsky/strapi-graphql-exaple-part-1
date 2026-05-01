@@ -283,7 +283,7 @@ What TypeScript knows here, purely from the `paths` type, with zero runtime over
 - `error` is typed as the error-response shape from the spec.
 - Either `data` or `error` is defined, never both. The check is enforced at the type level.
 
-At runtime it is just a `fetch` call with the URL substituted and headers set; there is no client-side schema validation, no proxy, no magic. The whole library is a typed wrapper.
+At runtime it is a `fetch` call with the URL substituted and headers set; there is no client-side schema validation, no proxy, no magic. The whole library is a typed wrapper.
 
 The end result is the same "compile error if the API changes" guarantee that GraphQL Code Generator gives you, with no codegen pipeline to maintain beyond a single CLI step that runs in CI.
 
@@ -755,7 +755,7 @@ These types are designed for backend code (Document Service calls, custom contro
 For a frontend on Strapi v5 today, three community-supported routes work:
 
 - The [`strapi-typed-client`](https://market.strapi.io/plugins/strapi-typed-client) plugin (Strapi v5.0.0 and above, Node 18+) generates TypeScript interfaces from your schema and ships a fully typed fetch client with `find`, `findOne`, `create`, `update`, `delete`, populate-aware return types, and DynamicZone support.
-- The Notum [`strapi-next-monorepo-starter`](https://github.com/notum-cz/strapi-next-monorepo-starter) shows the monorepo pattern for the same problem. Strapi v5 plus Next.js 16 in a Turborepo, with a dedicated `packages/strapi-types` package that mirrors the Strapi-generated content-type definitions and exposes them to the Next.js app as a shared workspace dependency. Read the repo's README for the full setup; it is the reference if you want full type-sharing across the boundary without writing the plumbing yourself.
+- The Notum [`strapi-next-monorepo-starter`](https://github.com/notum-cz/strapi-next-monorepo-starter) shows the monorepo pattern for the same problem. Strapi v5 plus Next.js 16 in a Turborepo, with a dedicated `packages/strapi-types` workspace package that mirrors the Strapi-generated content-type definitions and exposes them to the Next.js app as a shared dependency. Read the repo's README for the full setup; it is the reference if you want full type-sharing across the boundary without writing the plumbing yourself.
 - The OpenAPI plus `openapi-fetch` flow in section 4.2 below.
 
 ### 4.2 OpenAPI generation
@@ -812,8 +812,6 @@ What the editor and the type checker do for you here, all from `paths`:
 
 At runtime `openapi-fetch` does the URL substitution and calls the platform `fetch`. There is no schema validation on the wire and no proxy. The library is roughly six kilobytes and almost all of its value sits at the type layer. Strapi's API does not change, the responses do not change, the network behavior does not change. What changes is that the editor catches mistakes before the request runs.
 
-The Strapi blog post [Type-Safe Fetch with Next.js, Strapi, and OpenAPI](https://strapi.io/blog/type-safe-fetch-with-next-js-strapi-and-openapi) walks through this same pattern with a Next.js client.
-
 End-to-end TypeScript with no GraphQL stack, no Apollo runtime, no codegen pipeline beyond a single CLI step that runs in CI.
 
 ### 4.4 GraphQL types
@@ -824,17 +822,17 @@ npm i -D @graphql-codegen/cli @graphql-codegen/typescript @graphql-codegen/types
 
 Point `codegen.ts` at `http://localhost:1337/graphql` and your `*.graphql` operation files. You get typed query results.
 
-### 4.5 The honest comparison in Strapi
+### 4.5 REST plus OpenAPI vs GraphQL Code Generator in Strapi
 
-For a Strapi app, REST plus OpenAPI plus `openapi-fetch` matches or beats GraphQL Code Generator on developer experience:
+For a Strapi app, REST plus OpenAPI plus `openapi-fetch` matches GraphQL Code Generator on type safety, with less infrastructure:
 
 - No `.graphql` operation files to maintain.
 - No Apollo Client or urql shipped to the browser.
 - HTTP-level type safety (path params, query params, body, response, error).
 - No data-shape mismatch to reconcile between REST and GraphQL responses.
-- Edge caching just works.
+- Edge caching works without extra setup.
 
-The TypeScript argument for GraphQL evaporates the moment you pick up `openapi-fetch`.
+If your only reason for picking GraphQL was end-to-end TypeScript types, `openapi-fetch` covers that case in REST.
 
 ## 5. Should you use GraphQL?
 
