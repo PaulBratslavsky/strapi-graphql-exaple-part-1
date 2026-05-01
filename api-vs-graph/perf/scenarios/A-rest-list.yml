@@ -1,0 +1,21 @@
+config:
+  target: "http://localhost:1337"
+  phases:
+    - name: warmup
+      duration: 10
+      arrivalRate: 10
+    - name: load
+      duration: 60
+      arrivalRate: 50
+  http:
+    timeout: 30
+  ensure:
+    p95: 2000
+
+scenarios:
+  - name: REST list 25 basic entries (no relations)
+    flow:
+      - get:
+          url: "/api/basics?pagination[pageSize]=25"
+          expect:
+            - statusCode: 200

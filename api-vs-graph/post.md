@@ -330,7 +330,7 @@ GraphQL Subscriptions are part of the spec, transported over WebSocket (`graphql
 
 The internet is full of benchmarks "proving" one is faster than the other. Most are useless because they ignore caching.
 
-A fair summary:
+A fair summary at the protocol level:
 
 - **Cold paths.** GraphQL can do in one round trip what naive REST does in three. With well-designed REST (compound endpoints, includes), the difference disappears. HTTP/2 multiplexing closes most of what is left.
 - **Warm paths.** REST plus a CDN wins by a wide margin. A `304 Not Modified` or a CDN cache hit is in single-digit milliseconds. GraphQL POST requests bypass all of it unless you have set up APQ plus GET conversion plus edge caching, and the hit ratio is typically lower.
@@ -338,6 +338,41 @@ A fair summary:
 - **Database.** REST endpoints tend to be hand-tuned SQL. GraphQL leans on generic resolvers plus DataLoader, which is good but rarely matches a single optimized query.
 
 At the protocol level, the differences are small and dominated by your database access patterns and your caching strategy. Choose for fit, not for benchmarks.
+
+#### Measured: Strapi v5 REST vs GraphQL on Postgres
+
+We ran a small load test against the `examples/complex` app from the `strapi/strapi` monorepo to put numbers on the resolver-overhead claim. The full methodology, raw Artillery output, and reproduction commands are in [`perf-results.md`](./perf-results.md). Headline setup:
+
+- Strapi v5.44.0, Postgres 16 in Docker, single workstation.
+- Public role granted `find` and `findOne` on the test content types.
+- Artillery, 10s warmup at 10 req/s plus 60s sustained at 50 req/s constant arrival rate (~3,100 requests per scenario).
+- Each scenario ran in isolation: every test starts with a fresh Postgres container, the seeded snapshot restored, and a freshly booted Strapi process. REST and GraphQL never run together.
+- Single run per scenario. Treat as a directional comparison, not a final benchmark.
+
+Three scenarios, each asking for the same data on both APIs:
+
+- **A.** List 25 entries from `basic` (scalars only, no relations).
+- **B.** List 25 entries from `relation` with one one-to-one relation, one many-to-many, and one component populated.
+- **C.** List 10 entries from `relation` with all relations populated, two single components, two repeatable components, and two dynamic zones.
+
+| Scenario | API | Achieved rate (req/s) | Median (ms) | p95 (ms) | p99 (ms) | Max (ms) |
+| --- | --- | --- | --- | --- | --- | --- |
+| A | REST | 50 | 7.9 | 12.1 | 15.0 | 28 |
+| A | GraphQL | 50 | 6.0 | 8.9 | 10.9 | 31 |
+| B | REST | 50 | 13.1 | 16.9 | 19.9 | 35 |
+| B | GraphQL | 50 | 32.8 | 58.6 | 68.7 | 97 |
+| C | REST | 49 | 22.0 | 26.8 | 32.1 | 45 |
+| C | GraphQL | 40 | 58.6 | 273.2 | 295.9 | 312 |
+
+What the numbers say:
+
+- **Simple list (A).** Both APIs are fast. GraphQL is slightly faster on this shape (6.0 vs 7.9 ms median), within noise but consistent. The REST envelope (`meta.pagination`, auto-included `id`/`documentId`/timestamps) plus the `qs` parser is a small overhead.
+- **Populated list (B).** REST is roughly 2.5× faster on median and 3.5× faster on p95. Same logical request, same database rows. The cost is in Strapi's GraphQL resolvers: each relation has its own resolver, and the per-field overhead adds up.
+- **Deep populate with dynamic zones (C).** REST holds steady at 22 ms median and 26.8 ms p95, with 0 errors and no rate degradation. GraphQL is 2.7× slower on median, 10× slower on p95, and the server could not keep pace with 50 req/s sustained: the achieved rate dropped to 40 req/s. This is the resolver-fan-out shape of the work showing up at the tail.
+
+The pattern: the more nested fields a request asks for, the more REST's explicit `populate` (which lets Strapi build one or a small number of SQL queries with the right joins) wins over GraphQL's resolver tree (where each relation and component has its own DB call by default). On a shallow query the two are at parity. On a deep one REST is several times faster and the gap grows in the tail.
+
+This test does not measure REST's CDN-cache case (a `Cache-Control: public, s-maxage=60` GET that the edge serves without touching origin), nor GraphQL's APQ workaround. Those would change the numbers further in REST's favor and partly close the gap on GraphQL respectively.
 
 ### 2.9 Public APIs
 
